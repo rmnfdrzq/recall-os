@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: recallos_db
+    restart: always
+    environment:
+      POSTGRES_DB: recallos
+      POSTGRES_USER: recallos_user
+      POSTGRES_PASSWORD: recallos_secure_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - recallos_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: recallos_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    networks:
+      - recallos_network
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: recallos_ollama
+    restart: always
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama:/root/.ollama
+    # For GPU acceleration on Linux/Windows. Commented out by default as macOS developers run Ollama natively.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    networks:
+      - recallos_network
+
+volumes:
+  pgdata:
+  redisdata:
+  ollama:
+
+networks:
+  recallos_network:
+    driver: bridge
