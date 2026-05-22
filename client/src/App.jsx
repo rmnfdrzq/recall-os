@@ -460,8 +460,7 @@ export default function App() {
       const res = await fetch(`${API_BASE}/chat/session/${currentSessionId}/message/`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'X-Active-Model': activeModel
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({ content: userText, model: activeModel })
       });

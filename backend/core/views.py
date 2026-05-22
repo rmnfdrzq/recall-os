@@ -241,7 +241,7 @@ class ChatMessageCreateView(APIView):
         )
 
         # Extract active model
-        active_model = request.data.get('model') or request.headers.get('X-Active-Model') or 'qwen2.5:1.5b'
+        active_model = request.data.get('model') or 'qwen2.5:1.5b'
 
         # 4. Generate LLM completion
         ai_response = generate_completion(content, system_prompt=system_prompt, stream=False, model=active_model)

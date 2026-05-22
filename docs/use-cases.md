@@ -116,7 +116,7 @@ Flow:
 3. Client fetches `/api/models/`.
 4. Installed models show `INSTALLED`.
 5. Operator activates an installed model.
-6. Chat requests include selected model in request body and `X-Active-Model` header.
+6. Chat requests include selected model in the JSON request body.
 
 Expected result:
 

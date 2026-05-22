@@ -151,12 +151,6 @@ Request:
 }
 ```
 
-The selected model can also be provided through:
-
-```http
-X-Active-Model: qwen3.5:4b
-```
-
 Response:
 
 ```json
