@@ -34,7 +34,47 @@ const getFileUrl = (filePath) => {
   return `${BACKEND_HOST}${filePath}`;
 };
 
+const getPdfPreviewUrl = (filePath) => {
+  const fileUrl = getFileUrl(filePath);
+  if (!fileUrl) return '';
+  const separator = fileUrl.includes('#') ? '&' : '#';
+  return `${fileUrl}${separator}pagemode=none&navpanes=0&zoom=page-width`;
+};
+
+const isMissingSummary = (summary) => {
+  const normalized = (summary || '').trim().toLowerCase();
+  return !normalized || [
+    'no summary generated',
+    'no summary generated.',
+    'no summary synthesized',
+    'no summary synthesized.'
+  ].includes(normalized);
+};
+
+const getSummaryText = (doc) => {
+  if (!doc) return '';
+  if (!isMissingSummary(doc.summary)) {
+    return doc.summary;
+  }
+  if (doc.status === 'pending' || doc.status === 'processing') {
+    return 'AI summary is being generated as part of document processing.';
+  }
+  return 'AI summary has not been generated for this document yet.';
+};
+
+const isDebugMode = () => {
+  const params = new URLSearchParams(window.location.search);
+  return (
+    params.get('debug') === '1' ||
+    params.get('debug') === 'true' ||
+    localStorage.getItem('recallosDebug') === 'true' ||
+    import.meta.env.VITE_RECALLOS_DEBUG === 'true'
+  );
+};
+
 export default function App() {
+  const debugMode = isDebugMode();
+
   // Core Application State
   const [documents, setDocuments] = useState([]);
   const [chatSessions, setChatSessions] = useState([]);
@@ -54,6 +94,7 @@ export default function App() {
   const [isSearching, setIsSearching] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
+  const [isSummarizingDoc, setIsSummarizingDoc] = useState(false);
   const [activeSourcePopov, setActiveSourcePopov] = useState(null); // referenced document detail popover
 
   // OCR & Local Workspace States
@@ -344,13 +385,35 @@ export default function App() {
       setSelectedDocDetails(data);
     } catch (err) {
       console.error("Error fetching doc details:", err);
-      // Fallback to basic info if chunks retrieval failed
       setSelectedDocDetails({
         ...doc,
-        chunks: [{ id: 'fallback-chunk', chunk_index: 0, content: doc.summary || doc.filename }]
+        chunks: []
       });
     } finally {
       setIsLoadingDocDetails(false);
+    }
+  };
+
+  const handleSummarizeDocument = async () => {
+    if (!selectedDocDetails || isSummarizingDoc) return;
+
+    setIsSummarizingDoc(true);
+    try {
+      const res = await fetch(`${API_BASE}/documents/${selectedDocDetails.id}/summarize/`, {
+        method: 'POST'
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to generate AI summary");
+      }
+
+      setSelectedDocDetails(data);
+      setDocuments(prev => prev.map(doc => doc.id === data.id ? data : doc));
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setIsSummarizingDoc(false);
     }
   };
 
@@ -495,9 +558,9 @@ export default function App() {
     switch (doc.file_type) {
       case 'pdf':
         return (
-          <div style={{ width: '100%', height: '450px', borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--panel-border)', background: 'var(--panel-bg-preview)', position: 'relative' }}>
+          <div style={{ width: '100%', height: 'clamp(680px, 78vh, 960px)', borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--panel-border)', background: 'var(--panel-bg-preview)', position: 'relative' }}>
             <iframe
-              src={fileUrl}
+              src={getPdfPreviewUrl(doc.file)}
               style={{ width: '100%', height: '100%', border: 'none' }}
               title={doc.suggested_title || doc.filename}
             />
@@ -835,27 +898,46 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Dynamic Preview Frame */}
-                {renderPreviewFrame(selectedDocDetails)}
-
                 {/* AI Summary */}
-                {selectedDocDetails.summary && (
-                  <div className="glass-panel" style={{ padding: '1rem', background: 'rgba(124,58,237,0.03)', border: '1px solid rgba(124,58,237,0.1)' }}>
-                    <h3 style={{ fontSize: '0.9rem', fontWeight: '800', color: '#a78bfa', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                <div className="glass-panel" style={{ padding: '1rem', background: 'rgba(124,58,237,0.03)', border: '1px solid rgba(124,58,237,0.1)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.5rem' }}>
+                    <h3 style={{ fontSize: '0.9rem', fontWeight: '800', color: '#a78bfa', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
                       <Sparkles size={14} />
                       <span>AI Synthesized Summary</span>
                     </h3>
-                    <p style={{ fontSize: '0.85rem', color: 'var(--text-primary)', lineHeight: '1.45' }}>
-                      {selectedDocDetails.summary}
-                    </p>
+                    {isMissingSummary(selectedDocDetails.summary) && (
+                      <button
+                        onClick={handleSummarizeDocument}
+                        disabled={isSummarizingDoc || selectedDocDetails.status !== 'processed'}
+                        className="btn-secondary"
+                        style={{
+                          padding: '0.45rem 0.8rem',
+                          fontSize: '0.75rem',
+                          borderRadius: '8px',
+                          border: '1px solid rgba(124,58,237,0.25)',
+                          background: isSummarizingDoc ? 'var(--surface-muted)' : 'rgba(124,58,237,0.12)',
+                          color: isSummarizingDoc ? 'var(--text-muted)' : '#a78bfa',
+                          cursor: isSummarizingDoc || selectedDocDetails.status !== 'processed' ? 'not-allowed' : 'pointer',
+                          fontWeight: '700'
+                        }}
+                      >
+                        {isSummarizingDoc ? 'Summarizing...' : 'Summarize'}
+                      </button>
+                    )}
                   </div>
-                )}
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-primary)', lineHeight: '1.45' }}>
+                    {getSummaryText(selectedDocDetails)}
+                  </p>
+                </div>
+
+                {/* Dynamic Preview Frame */}
+                {renderPreviewFrame(selectedDocDetails)}
 
                 {/* Document Chunks */}
-                {selectedDocDetails.chunks && selectedDocDetails.chunks.length > 0 && (
+                {debugMode && selectedDocDetails.chunks && selectedDocDetails.chunks.length > 0 && (
                   <div>
                     <h3 style={{ fontSize: '0.9rem', fontWeight: '800', color: 'var(--text-secondary)', marginBottom: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                      Indexed Text Portions ({selectedDocDetails.chunks.length})
+                      Debug: Indexed Text Portions ({selectedDocDetails.chunks.length})
                     </h3>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                       {selectedDocDetails.chunks.map((chunk, cIdx) => (

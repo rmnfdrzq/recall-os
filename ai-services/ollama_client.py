@@ -162,6 +162,95 @@ def clean_fallback_title(filename):
     return cleaned if cleaned else name
 
 
+SUMMARY_PLACEHOLDERS = {
+    "",
+    "no summary generated",
+    "no summary generated.",
+    "no summary synthesized",
+    "no summary synthesized.",
+    "n/a",
+    "none",
+    "null",
+}
+
+
+def is_missing_summary(summary):
+    if summary is None:
+        return True
+
+    normalized = str(summary).strip().lower()
+    return normalized in SUMMARY_PLACEHOLDERS or normalized.startswith("error ")
+
+
+def normalize_for_copy_check(value):
+    return re.sub(r"[^a-z0-9а-яё]+", " ", value or "", flags=re.IGNORECASE).strip().lower()
+
+
+def summary_looks_copied_from_source(summary, document_text):
+    summary_norm = normalize_for_copy_check(summary)
+    source_norm = normalize_for_copy_check(document_text)
+
+    if len(summary_norm) < 60 or not source_norm:
+        return False
+
+    source_prefix = source_norm[:max(len(summary_norm) + 120, 300)]
+    return source_prefix.startswith(summary_norm)
+
+
+def clean_generated_summary(raw_summary, max_length=700):
+    summary = (raw_summary or "").strip()
+    if is_missing_summary(summary):
+        return ""
+
+    if summary.startswith("```"):
+        summary = re.sub(r"^```[a-zA-Z]*\s*", "", summary)
+        summary = re.sub(r"\s*```$", "", summary)
+
+    summary = summary.strip().strip('"').strip("'").strip()
+    summary = re.sub(r"^(summary|ai summary)\s*:\s*", "", summary, flags=re.IGNORECASE)
+    summary = re.sub(r"\s+", " ", summary).strip()
+
+    if is_missing_summary(summary):
+        return ""
+
+    if len(summary) > max_length:
+        summary = summary[:max_length - 3].rstrip() + "..."
+
+    return summary
+
+
+def generate_document_summary(document_text, fallback_title=None):
+    """
+    Generates a concise AI summary. This must not copy the first indexed text
+    chunk; if the LLM cannot produce a useful answer, return an empty string so
+    the UI can show an unavailable state instead of fake summary text.
+    """
+    text = re.sub(r'\s+', ' ', document_text or '').strip()
+    if not text:
+        return ""
+
+    if text.startswith("[Scanned PDF]") or text.startswith("[PDF Parsing Failed]"):
+        return ""
+
+    title_hint = clean_fallback_title(fallback_title)
+    system_prompt = (
+        "You write concise document summaries for a local knowledge workspace. "
+        "Return only a short high-level summary in 2-3 sentences. "
+        "Do not quote the source text, do not copy the opening paragraph, and do not use bullet points."
+    )
+    prompt = (
+        f"Document title hint: {title_hint}\n\n"
+        "Summarize what this document is about and what its main useful information is:\n\n"
+        f"{text[:6000]}"
+    )
+
+    raw_summary = generate_completion(prompt, system_prompt=system_prompt, stream=False)
+    summary = clean_generated_summary(raw_summary)
+    if summary_looks_copied_from_source(summary, text):
+        return ""
+    return summary
+
+
 def extract_metadata(document_text, fallback_title=None):
     """
     Uses the local LLM to extract structured metadata (JSON) from raw document text.
@@ -202,12 +291,20 @@ def extract_metadata(document_text, fallback_title=None):
         if not suggested_title or suggested_title.lower() in ["untitled", "untitled document", "untitled_document"]:
             suggested_title = default_title
 
+        summary = metadata.get("summary", "")
+        if is_missing_summary(summary) or summary_looks_copied_from_source(summary, document_text):
+            summary = generate_document_summary(document_text, fallback_title)
+
+        tags = metadata.get("tags", [])
+        if not isinstance(tags, list) or not tags:
+            tags = ["AI-Ingested"]
+
         # Ensure all keys are populated
         return {
             "suggested_title": suggested_title,
-            "summary": metadata.get("summary", "No summary generated."),
+            "summary": summary,
             "category": metadata.get("category", "General"),
-            "tags": metadata.get("tags", [])
+            "tags": tags
         }
     except Exception as e:
         logger.warning(f"Ollama structured JSON metadata extraction failed, falling back to regex. Raw: {raw_response}. Error: {e}")
@@ -221,7 +318,9 @@ def extract_metadata(document_text, fallback_title=None):
         if not title or title.lower() in ["untitled", "untitled document", "untitled_document"]:
             title = default_title
 
-        summary = summary_match.group(1) if summary_match else "No summary generated."
+        summary = summary_match.group(1).strip() if summary_match else ""
+        if is_missing_summary(summary) or summary_looks_copied_from_source(summary, document_text):
+            summary = generate_document_summary(document_text, fallback_title)
         category = category_match.group(1) if category_match else "General"
 
         return {

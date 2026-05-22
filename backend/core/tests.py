@@ -1,11 +1,19 @@
 import os
+import sys
 import tempfile
+from pathlib import Path
 from unittest.mock import patch
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
 from core.models import Document, DocumentChunk, ChatSession, ChatMessage
+
+AI_SERVICES_DIR = Path(__file__).resolve().parents[2] / "ai-services"
+if str(AI_SERVICES_DIR) not in sys.path:
+    sys.path.append(str(AI_SERVICES_DIR))
+
+from ollama_client import extract_metadata
 
 # Mock embeddings for pgvector dimension 768
 MOCK_EMBEDDING = [0.05] * 768
@@ -81,6 +89,113 @@ class RecallOSTests(APITestCase):
         self.assertEqual(len(response.data['results']), 1)
         self.assertEqual(response.data['results'][0]['content'], chunk.content)
         self.assertEqual(response.data['results'][0]['similarity'], 1.0) # CosineDistance of same vector is 0, so similarity is 1.0
+
+    def test_document_detail_does_not_replace_missing_ai_summary_with_chunks(self):
+        document = Document.objects.create(
+            filename="strategy.txt",
+            file_type="text",
+            status="processed",
+            suggested_title="Strategy Notes",
+            summary="No summary generated.",
+            category="General",
+            tags=["AI-Ingested"]
+        )
+        DocumentChunk.objects.create(
+            document=document,
+            content="This document explains the product strategy for local-first document search. It covers upload processing, semantic indexing, and contextual chat over stored knowledge.",
+            chunk_index=0
+        )
+
+        response = self.client.get(reverse('document-detail', kwargs={"pk": document.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['summary'], "")
+
+    def test_document_detail_hides_summary_copied_from_first_chunk(self):
+        copied_summary = "This document explains the product strategy for local-first document search."
+        document = Document.objects.create(
+            filename="strategy.txt",
+            file_type="text",
+            status="processed",
+            suggested_title="Strategy Notes",
+            summary=copied_summary,
+            category="General",
+            tags=["AI-Ingested"]
+        )
+        DocumentChunk.objects.create(
+            document=document,
+            content=f"{copied_summary} It covers upload processing, semantic indexing, and contextual chat over stored knowledge.",
+            chunk_index=0
+        )
+
+        response = self.client.get(reverse('document-detail', kwargs={"pk": document.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['summary'], "")
+
+    @patch('core.views.generate_document_summary')
+    def test_document_summarize_endpoint_generates_and_saves_summary(self, mock_summary):
+        mock_summary.return_value = "This document is a concise AI summary about a local-first search workspace."
+        document = Document.objects.create(
+            filename="strategy.txt",
+            file_type="text",
+            status="processed",
+            suggested_title="Strategy Notes",
+            summary="",
+            category="General",
+            tags=["AI-Ingested"]
+        )
+        DocumentChunk.objects.create(
+            document=document,
+            content="Raw first chunk that should be sent as source material, not displayed as a fallback summary.",
+            chunk_index=0
+        )
+
+        response = self.client.post(reverse('document-summarize', kwargs={"pk": document.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['summary'], mock_summary.return_value)
+        self.assertEqual(len(response.data['chunks']), 1)
+        document.refresh_from_db()
+        self.assertEqual(document.summary, mock_summary.return_value)
+        mock_summary.assert_called_once()
+
+    @patch('ollama_client.generate_completion')
+    def test_extract_metadata_generates_llm_summary_when_json_summary_missing(self, mock_completion):
+        document_text = (
+            "This is the first indexed text portion and should not be reused as the summary. "
+            "It contains implementation details, line items, and raw document phrasing. "
+            "Later sections describe a local-first AI workspace for document search and chat."
+        )
+        ai_summary = "The document describes a local-first AI workspace that indexes uploaded files and supports semantic search with contextual chat."
+        mock_completion.side_effect = [
+            '{"suggested_title": "Workspace Notes", "category": "Technology", "tags": ["AI", "search"]}',
+            ai_summary,
+        ]
+
+        metadata = extract_metadata(document_text, fallback_title="workspace.txt")
+
+        self.assertEqual(metadata['summary'], ai_summary)
+        self.assertNotEqual(metadata['summary'], document_text[:len(metadata['summary'])])
+        self.assertEqual(mock_completion.call_count, 2)
+
+    @patch('ollama_client.generate_completion')
+    def test_extract_metadata_regenerates_summary_when_json_summary_copies_source(self, mock_completion):
+        copied_summary = "This is the first indexed text portion and should not be reused as the summary."
+        document_text = (
+            f"{copied_summary} It contains implementation details and raw document phrasing. "
+            "Later sections describe a local-first AI workspace for document search and chat."
+        )
+        ai_summary = "The document describes a local-first AI workspace for indexing documents and chatting with retrieved context."
+        mock_completion.side_effect = [
+            f'{{"suggested_title": "Workspace Notes", "summary": "{copied_summary}", "category": "Technology", "tags": ["AI"]}}',
+            ai_summary,
+        ]
+
+        metadata = extract_metadata(document_text, fallback_title="workspace.txt")
+
+        self.assertEqual(metadata['summary'], ai_summary)
+        self.assertEqual(mock_completion.call_count, 2)
 
     @patch('core.views.generate_embedding')
     @patch('core.views.generate_completion')

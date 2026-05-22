@@ -6,6 +6,7 @@ import requests
 from django.http import StreamingHttpResponse
 from django.conf import settings
 from rest_framework import viewsets, status
+from rest_framework.decorators import action
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
@@ -49,7 +50,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKSPACE_ROOT = os.path.dirname(BASE_DIR)
 sys.path.append(os.path.join(WORKSPACE_ROOT, 'ai-services'))
 
-from ollama_client import generate_embedding, generate_completion, OLLAMA_BASE_URL
+from ollama_client import generate_embedding, generate_completion, generate_document_summary, OLLAMA_BASE_URL
 from .models import Document, DocumentChunk, ChatSession, ChatMessage
 from .serializers import (
     DocumentSerializer,
@@ -70,7 +71,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
 
     def get_serializer_class(self):
-        if self.action == 'retrieve':
+        if self.action in ['retrieve', 'summarize']:
             return DocumentDetailSerializer
         return self.serializer_class
 
@@ -100,6 +101,33 @@ class DocumentViewSet(viewsets.ModelViewSet):
         # Fire async background processing task
         process_document_pipeline.delay(document.id)
         logger.info(f"Queued background processing for uploaded document: {filename} (ID: {document.id})")
+
+    @action(detail=True, methods=['post'])
+    def summarize(self, request, pk=None):
+        document = self.get_object()
+        source_text = "\n\n".join(
+            chunk.content
+            for chunk in document.chunks.order_by('chunk_index')
+            if chunk.content
+        ).strip()
+
+        if not source_text:
+            return Response(
+                {"error": "Document has no indexed text to summarize yet."},
+                status=status.HTTP_409_CONFLICT
+            )
+
+        summary = generate_document_summary(source_text, fallback_title=document.filename)
+        if not summary:
+            return Response(
+                {"error": "AI summary could not be generated. Check the local Ollama model and try again."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+
+        document.summary = summary
+        document.save(update_fields=['summary', 'updated_at'])
+        serializer = self.get_serializer(document)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class SemanticSearchView(APIView):

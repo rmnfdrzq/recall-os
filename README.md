@@ -124,6 +124,19 @@ make app       # Docker + backend + frontend in one terminal
 
 `make app` runs `make install` first. `make backend` and `make app` run migrations before starting the API. Stop foreground processes with `Ctrl+C`.
 
+Debug launches:
+
+```bash
+make docker-debug
+make backend-debug
+make frontend-debug
+make app-debug
+```
+
+You can also use the variable form, for example `make frontend DEBUG=1` or `make app DEBUG=1`. The frontend debug mode shows technical panels such as `Debug: Indexed Text Portions`.
+
+GNU Make's native flag also works, for example `make frontend --debug` or `make app --debug`, but it prints GNU Make diagnostic output in addition to enabling RecallOS debug behavior.
+
 ### 1. Start infrastructure
 
 ```bash

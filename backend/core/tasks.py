@@ -14,7 +14,12 @@ sys.path.append(os.path.join(WORKSPACE_ROOT, 'ai-services'))
 
 # Now import our AI services
 from chunker import semantic_chunk_text
-from ollama_client import generate_embedding, extract_metadata
+from ollama_client import (
+    generate_embedding,
+    extract_metadata,
+    generate_document_summary,
+    is_missing_summary,
+)
 from ocr_service import extract_text_from_image
 
 
@@ -103,8 +108,12 @@ def process_document_pipeline(document_id):
             from ollama_client import clean_fallback_title
             suggested_title = clean_fallback_title(document.filename)
 
+        summary = metadata.get("summary", "")
+        if is_missing_summary(summary):
+            summary = generate_document_summary(extracted_text, fallback_title=document.filename)
+
         document.suggested_title = suggested_title
-        document.summary = metadata.get("summary", "No summary synthesized.")
+        document.summary = summary
         document.category = metadata.get("category", "General")
         document.tags = metadata.get("tags", ["AI-Ingested"])
         document.status = 'processed'

@@ -42,6 +42,19 @@ make app
 
 `make app` runs `make install` before starting services.
 
+Run any part with debug behavior:
+
+```bash
+make docker-debug
+make backend-debug
+make frontend-debug
+make app-debug
+```
+
+The equivalent variable form is `make frontend DEBUG=1`, `make backend DEBUG=1`, or `make app DEBUG=1`.
+
+GNU Make's native flag also enables the same behavior, for example `make frontend --debug` or `make app --debug`. It will also print GNU Make diagnostic output.
+
 ## Development Workflow
 
 1. Start Docker services.
@@ -117,6 +130,14 @@ npm run lint
 ```
 
 Known note: current lint status may include pre-existing React unused import and hook dependency issues. Treat lint failures as actionable before merging production work.
+
+## Frontend Debug Mode
+
+The document preview hides indexed chunks in normal usage. To inspect `Debug: Indexed Text Portions`, enable debug mode with one of these options:
+
+- open the app with `?debug=1` or `?debug=true`
+- set `localStorage.recallosDebug = 'true'` in the browser console
+- run the client with `VITE_RECALLOS_DEBUG=true`, `make frontend-debug`, or `make app-debug`
 
 ## Debugging Checklist
 

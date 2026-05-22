@@ -52,6 +52,14 @@ GET /api/documents/{document_id}/
 
 Returns document metadata and indexed chunks.
 
+### Generate Document Summary
+
+```http
+POST /api/documents/{document_id}/summarize/
+```
+
+Generates a document-level AI summary from indexed chunks, saves it to the document, and returns the updated document payload. If the document has no indexed text yet, the endpoint returns `409`. If the local model cannot create a usable summary, it returns `503`.
+
 ### Delete Document
 
 ```http

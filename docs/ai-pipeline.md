@@ -92,7 +92,9 @@ The database expects 768-dimensional vectors.
 }
 ```
 
-The code strips Markdown fences and attempts JSON parsing. If parsing fails, it uses regex fallbacks and safe defaults.
+The code strips Markdown fences and attempts JSON parsing. If parsing fails, it uses regex fallbacks and safe defaults. Summary placeholders such as `No summary generated` are not treated as valid output. When metadata does not contain a usable summary, the pipeline sends a second dedicated LLM request that asks for a concise 2-3 sentence document-level summary. It must not copy the first indexed chunk; if the LLM cannot generate a useful summary, the API returns an empty summary so the UI can show a `Summarize` action instead of a fake excerpt.
+
+The same summary generator is exposed through `POST /api/documents/{document_id}/summarize/`. The endpoint uses indexed chunks as source material, saves the generated summary on the document, and returns the updated document payload.
 
 ## Completion and Fallback Models
 
