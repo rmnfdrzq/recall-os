@@ -34,7 +34,7 @@ class Migration(migrations.Migration):
                 ('content', models.TextField()),
                 ('sources', models.JSONField(blank=True, default=list)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('session', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='messages', to='core.chatsession')),
+                ('session', models.ForeignKey(on_delete=models.CASCADE, related_name='messages', to='core.chatsession')),
             ],
             options={
                 'ordering': ['created_at'],
@@ -67,7 +67,7 @@ class Migration(migrations.Migration):
                 ('chunk_index', models.IntegerField()),
                 ('embedding', pgvector.django.vector.VectorField(blank=True, dimensions=768, null=True)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('document', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='chunks', to='core.document')),
+                ('document', models.ForeignKey(on_delete=models.CASCADE, related_name='chunks', to='core.document')),
             ],
             options={
                 'ordering': ['chunk_index'],
