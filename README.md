@@ -112,10 +112,21 @@ CELERY_RESULT_BACKEND=redis://redis:6379/0
 
 ## Quick Start
 
+After dependencies are installed, the short launch commands are:
+
+```bash
+make docker    # Docker services: PostgreSQL, Redis, Ollama
+make backend   # Django API + Celery worker
+make frontend  # Vite client
+make app       # Docker + backend + frontend in one terminal
+```
+
+`make backend` and `make app` run migrations before starting the API. Stop foreground processes with `Ctrl+C`.
+
 ### 1. Start infrastructure
 
 ```bash
-docker compose up -d db redis ollama
+make docker
 ```
 
 Ollama is exposed to the host on port `11435`.
@@ -134,41 +145,31 @@ Models can also be pulled from the AI Model Manager in the UI.
 ### 3. Install backend dependencies
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements.txt
+python3 -m venv backend/.venv
+backend/.venv/bin/pip install -r backend/requirements.txt
 ```
 
 ### 4. Run database migrations
 
 ```bash
-python backend/manage.py migrate
+backend/.venv/bin/python backend/manage.py migrate
 ```
 
 ### 5. Start the Django API
 
 ```bash
-python backend/manage.py runserver 127.0.0.1:8000
+make backend
 ```
 
-### 6. Start the Celery worker
-
-In a separate terminal:
-
-```bash
-source .venv/bin/activate
-cd backend
-celery -A recallos worker -l info
-```
-
-### 7. Start the frontend
+### 6. Start the frontend
 
 In a separate terminal:
 
 ```bash
 cd client
 npm install
-npm run dev
+cd ..
+make frontend
 ```
 
 Open:

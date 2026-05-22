@@ -7,15 +7,14 @@ This guide describes how to work on RecallOS without losing the shape of the sys
 Start infrastructure:
 
 ```bash
-docker compose up -d db redis ollama
+make docker
 ```
 
 Create Python environment:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements.txt
+python3 -m venv backend/.venv
+backend/.venv/bin/pip install -r backend/requirements.txt
 ```
 
 Install frontend dependencies:
@@ -28,27 +27,25 @@ npm install
 Run migrations:
 
 ```bash
-python backend/manage.py migrate
+backend/.venv/bin/python backend/manage.py migrate
 ```
 
-Run backend:
+Run the full backend:
 
 ```bash
-python backend/manage.py runserver 127.0.0.1:8000
-```
-
-Run Celery:
-
-```bash
-cd backend
-celery -A recallos worker -l info
+make backend
 ```
 
 Run frontend:
 
 ```bash
-cd client
-npm run dev
+make frontend
+```
+
+Run the full application in one terminal:
+
+```bash
+make app
 ```
 
 ## Development Workflow
