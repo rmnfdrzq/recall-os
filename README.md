@@ -115,13 +115,14 @@ CELERY_RESULT_BACKEND=redis://redis:6379/0
 After dependencies are installed, the short launch commands are:
 
 ```bash
+make install   # Python venv + backend packages + frontend packages
 make docker    # Docker services: PostgreSQL, Redis, Ollama
 make backend   # Django API + Celery worker
 make frontend  # Vite client
 make app       # Docker + backend + frontend in one terminal
 ```
 
-`make backend` and `make app` run migrations before starting the API. Stop foreground processes with `Ctrl+C`.
+`make app` runs `make install` first. `make backend` and `make app` run migrations before starting the API. Stop foreground processes with `Ctrl+C`.
 
 ### 1. Start infrastructure
 
@@ -145,8 +146,7 @@ Models can also be pulled from the AI Model Manager in the UI.
 ### 3. Install backend dependencies
 
 ```bash
-python3 -m venv backend/.venv
-backend/.venv/bin/pip install -r backend/requirements.txt
+make install
 ```
 
 ### 4. Run database migrations
@@ -167,7 +167,6 @@ In a separate terminal:
 
 ```bash
 cd client
-npm install
 cd ..
 make frontend
 ```

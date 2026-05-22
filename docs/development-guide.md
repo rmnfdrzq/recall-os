@@ -10,18 +10,10 @@ Start infrastructure:
 make docker
 ```
 
-Create Python environment:
+Install all dependencies:
 
 ```bash
-python3 -m venv backend/.venv
-backend/.venv/bin/pip install -r backend/requirements.txt
-```
-
-Install frontend dependencies:
-
-```bash
-cd client
-npm install
+make install
 ```
 
 Run migrations:
@@ -47,6 +39,8 @@ Run the full application in one terminal:
 ```bash
 make app
 ```
+
+`make app` runs `make install` before starting services.
 
 ## Development Workflow
 
