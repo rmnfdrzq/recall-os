@@ -225,6 +225,11 @@ body {
   animation: glimmer 1.5s infinite linear;
 }
 
+body.light-theme .skeleton-glimmer {
+  background: linear-gradient(90deg, rgba(15, 23, 42, 0.03) 25%, rgba(15, 23, 42, 0.08) 50%, rgba(15, 23, 42, 0.03) 75%);
+  background-size: 200% 100%;
+}
+
 /* Premium dynamic shine for progress bars */
 @keyframes progress-bar-shine {
   0% { background-position: 0% 50%; }

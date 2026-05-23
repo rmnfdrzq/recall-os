@@ -1362,7 +1362,10 @@ export default function App() {
               No documents yet. Drag & drop a file here!
             </div>
           ) : (
-            documents.map(doc => (
+            documents
+              .slice()
+              .sort((a, b) => new Date(b.created_at || b.createdAt || 0) - new Date(a.created_at || a.createdAt || 0))
+              .map(doc => (
               <div
                 key={doc.id}
                 onClick={() => handleSelectDocument(doc)}
