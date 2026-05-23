@@ -1,1 +1,0 @@
-This is a premium knowledge document about quantum computation.
