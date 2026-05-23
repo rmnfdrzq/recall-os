@@ -2,49 +2,25 @@ import os
 import sys
 import logging
 import json
+import tempfile
 import requests
 from django.http import StreamingHttpResponse
 from django.conf import settings
+from PyPDF2 import PdfReader
 from rest_framework import viewsets, status
-from rest_framework.decorators import action
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from django.shortcuts import get_object_or_404
-from pgvector.django import CosineDistance
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_OLLAMA_MODELS = [
     {
-        "name": "qwen2.5:1.5b",
-        "fallback_size": "986 MB",
-        "description": "Default lightweight LLM — fast & memory-efficient.",
-        "is_default": True,
-    },
-    {
-        "name": "llama3.2:3b",
-        "fallback_size": "2.0 GB",
-        "description": "Meta Llama 3.2 lightweight multilingual model.",
-        "is_default": False,
-    },
-    {
-        "name": "qwen3.5:4b",
-        "fallback_size": "2.6 GB",
-        "description": "Balanced medium-sized model for complex reasoning.",
-        "is_default": False,
-    },
-    {
-        "name": "qwen2.5:7b-instruct",
-        "fallback_size": "4.4 GB",
-        "description": "Premium 7B model — exceptional reasoning and Russian language support.",
-        "is_default": False,
-    },
-    {
         "name": "gemma4:e2b",
         "fallback_size": "6.7 GB",
         "description": "Google's Gemma E2B optimized variant.",
-        "is_default": False,
+        "is_default": True,
     },
 ]
 
@@ -62,141 +38,106 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKSPACE_ROOT = os.path.dirname(BASE_DIR)
 sys.path.append(os.path.join(WORKSPACE_ROOT, 'ai-services'))
 
-from ollama_client import generate_embedding, generate_completion, generate_document_summary, OLLAMA_BASE_URL
-from .models import Document, DocumentChunk, ChatSession, ChatMessage
+from chunker import semantic_chunk_text
+from ocr_service import extract_text_from_image
+from ollama_client import (
+    generate_completion,
+    extract_metadata,
+    generate_embeddings,
+)
+from .models import ChatSession, ChatMessage
 from .serializers import (
-    DocumentSerializer,
-    DocumentDetailSerializer,
     ChatSessionSerializer,
     ChatSessionDetailSerializer,
     ChatMessageSerializer
 )
-from .tasks import process_document_pipeline
 
 
-class DocumentViewSet(viewsets.ModelViewSet):
-    """
-    Handles Document uploading, listing, details and deleting.
-    Triggers Celery background tasks upon upload.
-    """
-    serializer_class = DocumentSerializer
-    permission_classes = [AllowAny]
+def infer_file_type(filename):
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in ['.png', '.jpg', '.jpeg', '.webp']:
+        return 'image'
+    if ext == '.pdf':
+        return 'pdf'
+    if ext in ['.md', '.markdown']:
+        return 'markdown'
+    return 'text'
 
-    def get_serializer_class(self):
-        if self.action in ['retrieve', 'summarize']:
-            return DocumentDetailSerializer
-        return self.serializer_class
 
-    def get_queryset(self):
-        return Document.objects.all()
+def extract_uploaded_file_text(uploaded_file, filename):
+    ext = os.path.splitext(filename)[1].lower()
 
-    def perform_create(self, serializer):
-        uploaded_file = self.request.FILES.get('file')
-        filename = uploaded_file.name
+    if ext in ['.txt', '.md', '.markdown', '.py', '.js', '.ts', '.jsx', '.tsx', '.json', '.csv', '.html', '.css', '.rs', '.go', '.yaml', '.yml']:
+        return uploaded_file.read().decode('utf-8', errors='ignore')
 
-        # Simple extension matching
-        ext = os.path.splitext(filename)[1].lower()
-        file_type = 'text'
+    suffix = ext or '.upload'
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            for chunk in uploaded_file.chunks():
+                tmp.write(chunk)
+            temp_path = tmp.name
+
+        if ext == '.pdf':
+            reader = PdfReader(temp_path)
+            pages_text = []
+            for page_index, page in enumerate(reader.pages, start=1):
+                page_content = page.extract_text()
+                if page_content:
+                    pages_text.append(f"[Page {page_index}]\n\n{page_content}")
+            extracted_text = "\n\n".join(pages_text)
+            if extracted_text.strip():
+                return extracted_text
+            return "[Scanned PDF] No digital characters found. OCR or LLM vision extraction is required."
+
         if ext in ['.png', '.jpg', '.jpeg', '.webp']:
-            file_type = 'image'
-        elif ext == '.pdf':
-            file_type = 'pdf'
-        elif ext in ['.md', '.markdown']:
-            file_type = 'markdown'
+            return f"[Page 1]\n\n{extract_text_from_image(temp_path)}"
 
-        document = serializer.save(
-            filename=filename,
-            file_type=file_type,
-            status='pending'
-        )
-
-        # Fire async background processing task
-        process_document_pipeline.delay(document.id)
-        logger.info(f"Queued background processing for uploaded document: {filename} (ID: {document.id})")
-
-    @action(detail=True, methods=['post'])
-    def summarize(self, request, pk=None):
-        document = self.get_object()
-        source_text = "\n\n".join(
-            chunk.content
-            for chunk in document.chunks.order_by('chunk_index')
-            if chunk.content
-        ).strip()
-
-        if not source_text:
-            return Response(
-                {"error": "Document has no indexed text to summarize yet."},
-                status=status.HTTP_409_CONFLICT
-            )
-
-        summary = generate_document_summary(source_text, fallback_title=document.filename)
-        if not summary:
-            return Response(
-                {"error": "AI summary could not be generated. Check the local Ollama model and try again."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE
-            )
-
-        document.summary = summary
-        document.save(update_fields=['summary', 'updated_at'])
-        serializer = self.get_serializer(document)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        return uploaded_file.read().decode('utf-8', errors='ignore')
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                logger.warning("Failed to delete temporary upload file: %s", temp_path)
 
 
-class SemanticSearchView(APIView):
+class StatelessDocumentProcessView(APIView):
     """
-    Executes Semantic Search using local embedding model and pgvector similarity match.
+    Transient server fallback for client-first ingestion.
+    Extracts text and metadata from an uploaded file, returns JSON, and persists nothing.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
-        query = request.data.get('query', '').strip()
-        category = request.data.get('category', '').strip()
-        top_k = int(request.data.get('top_k', 5))
+        uploaded_file = request.FILES.get('file')
+        if not uploaded_file:
+            return Response({"error": "File is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not query:
-            return Response({"error": "Query parameter is required"}, status=status.HTTP_400_BAD_REQUEST)
+        filename = uploaded_file.name
+        file_type = infer_file_type(filename)
 
-        # Generate query vector using local model
-        query_vector = generate_embedding(query)
-        if not query_vector:
-            return Response(
-                {"error": "Failed to generate query embeddings. Please check Ollama connection status."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE
-            )
+        try:
+            extracted_text = extract_uploaded_file_text(uploaded_file, filename).strip()
+            if not extracted_text:
+                return Response({"error": "No text could be extracted from the file"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
-        # Query chunks with CosineDistance similarity metric across the local workspace.
-        queryset = DocumentChunk.objects.all()
+            chunks = semantic_chunk_text(extracted_text, chunk_size=1000, overlap=200)
+            metadata = extract_metadata(extracted_text, fallback_title=filename)
 
-        # Apply metadata categorization filters
-        if category:
-            queryset = queryset.filter(document__category__iexact=category)
-
-        # Fetch matching chunks order by vector distance
-        chunks = queryset.annotate(
-            distance=CosineDistance('embedding', query_vector)
-        ).order_by('distance')[:top_k]
-
-        results = []
-        for chunk in chunks:
-            # Skip unindexed/failed embeddings
-            if chunk.distance is None:
-                continue
-
-            similarity = round(1 - chunk.distance, 4) # cosine similarity = 1 - cosine distance
-            results.append({
-                "document_id": chunk.document.id,
-                "filename": chunk.document.filename,
-                "suggested_title": chunk.document.suggested_title,
-                "category": chunk.document.category,
-                "content": chunk.content,
-                "chunk_index": chunk.chunk_index,
-                "similarity": similarity
-            })
-
-        return Response({
-            "query": query,
-            "results": results
-        })
+            return Response({
+                "filename": filename,
+                "file_type": file_type,
+                "text": extracted_text,
+                "chunks": chunks,
+                "suggested_title": metadata.get("suggested_title") or filename,
+                "summary": metadata.get("summary", ""),
+                "category": metadata.get("category", "General"),
+                "tags": metadata.get("tags", ["AI-Ingested"]),
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception("Transient document processing failed for %s: %s", filename, e)
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class ChatSessionViewSet(viewsets.ModelViewSet):
@@ -239,49 +180,62 @@ class ChatMessageCreateView(APIView):
         )
 
         # 2. Retrieve Semantic Excerpts (RAG Context)
-        query_vector = generate_embedding(content)
         context_chunks = []
         sources = []
 
-        if query_vector:
-            # Query top 8 most similar chunks from processed local documents.
-            chunks = DocumentChunk.objects.filter(
-                document__status='processed'
-            ).annotate(
-                distance=CosineDistance('embedding', query_vector)
-            ).order_by('distance')[:8]
-
-            for chunk in chunks:
-                if chunk.distance is not None and (1 - chunk.distance) > 0.18: # similarity threshold
-                    context_chunks.append(chunk)
-                    sources.append({
-                        "document_id": str(chunk.document.id),
-                        "filename": chunk.document.filename,
-                        "suggested_title": chunk.document.suggested_title or chunk.document.filename,
-                        "chunk_index": chunk.chunk_index,
-                        "snippet": chunk.content[:150] + "..."
-                    })
+        client_context = request.data.get('context_chunks') or []
+        if client_context:
+            for idx, item in enumerate(client_context[:24]):
+                chunk_content = str(item.get('content') or item.get('text') or '').strip()
+                if not chunk_content:
+                    continue
+                source_title = item.get('suggested_title') or item.get('filename') or 'Local document'
+                context_chunks.append({
+                    "title": source_title,
+                    "chunk_index": item.get('chunk_index', idx),
+                    "page_number": item.get('page_number'),
+                    "section_title": item.get('section_title') or "Document",
+                    "content_type": item.get('content_type') or "paragraph",
+                    "reason": item.get('reason') or "retrieval",
+                    "entities": item.get('entities') or {},
+                    "content": chunk_content,
+                })
+                sources.append({
+                    "document_id": str(item.get('document_id') or ''),
+                    "filename": item.get('filename') or source_title,
+                    "suggested_title": source_title,
+                    "chunk_index": item.get('chunk_index', idx),
+                    "page_number": item.get('page_number'),
+                    "section_title": item.get('section_title') or "Document",
+                    "snippet": chunk_content[:150] + ("..." if len(chunk_content) > 150 else ""),
+                })
 
         # 3. Construct contextual prompt
         context_str = ""
         if context_chunks:
-            context_str = "\n".join([
-                f"Source Document: {c.document.suggested_title or c.document.filename} (Chunk {c.chunk_index})\n"
-                f"Content Excerpt:\n{c.content}\n"
-                f"---"
-                for c in context_chunks
-            ])
+            if client_context:
+                context_str = "\n".join([
+                    f"Source Document: {c['title']} "
+                    f"(Section: {c['section_title']}; Page: {c.get('page_number') or 'unknown'}; "
+                    f"Chunk: {c['chunk_index']}; Type: {c['content_type']}; Reason: {c['reason']})\n"
+                    f"Detected Entities: {json.dumps(c.get('entities') or {}, ensure_ascii=False)}\n"
+                    f"Content Excerpt:\n{c['content']}\n"
+                    f"---"
+                    for c in context_chunks
+                ])
 
         system_prompt = (
             "You are RecallOS AI, a personal knowledge workspace assistant.\n"
-            "You answer the user's questions utilizing ONLY the retrieved personal document excerpts supplied below.\n"
-            "If the context is empty or does not contain enough info, clearly state it and answer based on general knowledge.\n"
+            "Use the retrieved personal document excerpts, their sections, pages, and detected entities to answer accurately.\n"
+            "For list-style questions, consolidate facts across all supplied excerpts instead of answering from the first excerpt only.\n"
+            "When the answer depends on documents, cite source document names and sections/pages when available.\n"
+            "If the context is empty or does not contain enough info, clearly state that the local documents do not contain enough information before using general knowledge.\n"
             "Keep your formatting clean, structured in markdown, and highly readable.\n\n"
             f"Retrieved Context:\n{context_str}"
         )
 
         # Extract active model
-        active_model = request.data.get('model') or 'qwen2.5:1.5b'
+        active_model = request.data.get('model') or getattr(settings, 'OLLAMA_LLM_MODEL', 'gemma4:e2b')
 
         # 4. Generate LLM completion
         ai_response = generate_completion(content, system_prompt=system_prompt, stream=False, model=active_model)
@@ -369,7 +323,7 @@ class OllamaModelPullView(APIView):
     def get(self, request):
         ollama_url = get_ollama_base_url()
 
-        model_name = request.GET.get('model', 'qwen2.5:1.5b')
+        model_name = request.GET.get('model', 'gemma4:e2b')
         if model_name not in SUPPORTED_OLLAMA_MODEL_NAMES:
             return Response({"error": f"Unsupported model: {model_name}"}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -417,3 +371,28 @@ class OllamaModelDeleteView(APIView):
                 return Response({"error": f"Ollama deletion failed ({response.status_code}): {response.text}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class StatelessEmbeddingsView(APIView):
+    """
+    Stateless endpoint that generates embeddings for a batch of texts using Ollama.
+    Persists absolutely no user files or vector results on the server.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        texts = request.data.get('texts')
+        if not texts or not isinstance(texts, list):
+            return Response({"error": "A list of 'texts' is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        model_name = request.data.get('model', 'bge-m3')
+
+        try:
+            embeddings = generate_embeddings(texts, model=model_name)
+            return Response({
+                "embeddings": embeddings
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception("Stateless embeddings batch generation failed")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

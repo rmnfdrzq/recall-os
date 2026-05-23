@@ -18,56 +18,11 @@ def _get_ollama_url():
     return os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11435').rstrip('/')
 
 def _get_llm_model():
-    return os.environ.get('OLLAMA_LLM_MODEL', 'qwen2.5:1.5b')
+    return os.environ.get('OLLAMA_LLM_MODEL', 'gemma4:e2b')
 
-def _get_embed_model():
-    return os.environ.get('OLLAMA_EMBED_MODEL', 'nomic-embed-text-v2-moe')
-
-# Keep module-level names for backward compatibility (imported by views.py)
+# Keep module-level names for compatibility with older imports.
 OLLAMA_BASE_URL = _get_ollama_url()
 OLLAMA_LLM_MODEL = _get_llm_model()
-OLLAMA_EMBED_MODEL = _get_embed_model()
-
-
-def generate_embedding(text):
-    """
-    Generates a dense vector embedding using Ollama.
-    Supports both /api/embed (newer) and /api/embeddings (older) endpoint signatures.
-    """
-    ollama_url = _get_ollama_url()
-    embed_model = _get_embed_model()
-
-    # Newer endpoint signature (/api/embed)
-    try:
-        url = f"{ollama_url}/api/embed"
-        payload = {
-            "model": embed_model,
-            "input": text if isinstance(text, list) else [text]
-        }
-        response = requests.post(url, json=payload, timeout=60)
-        if response.status_code == 200:
-            data = response.json()
-            embeddings = data.get('embeddings', [])
-            if embeddings:
-                return embeddings[0] if not isinstance(text, list) else embeddings
-    except Exception as e:
-        logger.warning(f"Newer Ollama /api/embed API failed, trying older legacy /api/embeddings. Error: {e}")
-
-    # Legacy endpoint signature fallback (/api/embeddings)
-    try:
-        url = f"{ollama_url}/api/embeddings"
-        payload = {
-            "model": embed_model,
-            "prompt": text
-        }
-        response = requests.post(url, json=payload, timeout=60)
-        if response.status_code == 200:
-            return response.json().get('embedding', [])
-    except Exception as e:
-        logger.error(f"Legacy Ollama /api/embeddings also failed. Vector search will be unavailable. Error: {e}")
-
-    # Return empty list in case of absolute failure so it doesn't crash the pipeline entirely
-    return []
 
 
 def get_fallback_model(attempted_model):
@@ -81,13 +36,13 @@ def get_fallback_model(attempted_model):
             if not names:
                 return None
 
-            # Prefer model with matching base name, then qwen, then first available
+            # Prefer model with matching base name, then gemma, then first available
             base = attempted_model.split(':')[0]
             for name in names:
                 if name.startswith(base):
                     return name
             for name in names:
-                if name.startswith('qwen'):
+                if name.startswith('gemma'):
                     return name
             return names[0]
     except Exception as e:
@@ -329,3 +284,46 @@ def extract_metadata(document_text, fallback_title=None):
             "category": category,
             "tags": ["AI-Ingested"]
         }
+
+
+def generate_embeddings(texts, model="bge-m3"):
+    """
+    Computes vector embeddings for a list of texts using host Ollama's /api/embed API.
+    Provides backward-compatibility fallbacks to /api/embeddings.
+    """
+    ollama_url = _get_ollama_url()
+    
+    # Resolve the correct installed model tag (e.g. if bge-m3:567m is installed instead of bge-m3)
+    selected_model = get_fallback_model(model) or model
+    logger.info(f"Using resolved embedding model: {selected_model}")
+
+    # Try Ollama's batch embed API first
+    url = f"{ollama_url}/api/embed"
+    payload = {
+        "model": selected_model,
+        "input": texts
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=60)
+        if response.status_code == 200:
+            return response.json().get('embeddings', [])
+        else:
+            # Fallback to older /api/embeddings for compatibility
+            logger.info(f"Ollama batch embed returned {response.status_code}, falling back to single /api/embeddings")
+            embeddings = []
+            single_url = f"{ollama_url}/api/embeddings"
+            for text in texts:
+                single_payload = {"model": selected_model, "prompt": text}
+                single_res = requests.post(single_url, json=single_payload, timeout=30)
+                if single_res.status_code == 200:
+                    embeddings.append(single_res.json().get('embedding', []))
+                else:
+                    logger.error(f"Ollama single embedding failed ({single_res.status_code}): {single_res.text}")
+                    # Return zero vector of size 1024 as error fallback
+                    embeddings.append([0.0] * 1024)
+            return embeddings
+    except Exception as e:
+        logger.error(f"Failed to communicate with Ollama for embeddings: {e}")
+        # Return dummy arrays to prevent complete failure of the ingestion chain
+        return [[0.0] * 1024 for _ in texts]
+

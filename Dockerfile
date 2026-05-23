@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 4. Install dependencies
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 5. Final Stage
 FROM python:3.11-slim as runner
@@ -23,8 +23,7 @@ FROM python:3.11-slim as runner
 WORKDIR /app
 
 # 6. Copy installed packages from builder
-COPY --from=builder /root/.local /root/.local
-ENV PATH=/root/.local/bin:$PATH
+COPY --from=builder /usr/local /usr/local
 
 # 7. Install runtime Postgres libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -33,13 +32,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 8. Copy Django source code
 COPY backend/ /app/
+COPY ai-services/ /ai-services/
 
 # 9. Copy entrypoint launcher
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # 10. Security: run app under a non-privileged system user
-RUN useradd -u 8888 django-user && chown -R django-user:django-user /app
+RUN useradd --create-home -u 8888 django-user && chown -R django-user:django-user /app /ai-services
 USER django-user
 
 EXPOSE 8000
