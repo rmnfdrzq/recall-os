@@ -1,4 +1,5 @@
 mod db;
+mod parser;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -38,9 +39,16 @@ pub fn run() {
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
+      db::upsert_local_document,
+      db::list_local_documents,
+      db::get_local_document,
+      db::delete_local_document,
       db::insert_document_chunks,
       db::search_local_vectors,
-      db::delete_document_chunks
+      db::delete_document_chunks,
+      parser::parse_file,
+      parser::read_file_bytes,
+      parser::select_local_file
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

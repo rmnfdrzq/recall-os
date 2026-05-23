@@ -13,14 +13,28 @@
     "windows": [
       {
         "title": "RecallOS",
-        "width": 800,
-        "height": 600,
+        "width": 1210,
+        "height": 770,
+        "minWidth": 1210,
+        "minHeight": 770,
         "resizable": true,
         "fullscreen": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/**",
+          "$DOCUMENT/**",
+          "$DOWNLOAD/**",
+          "$DESKTOP/**",
+          "$TEMP/**",
+          "/private/tmp/**",
+          "/Volumes/**"
+        ]
+      }
     }
   },
   "bundle": {

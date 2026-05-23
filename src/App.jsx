@@ -1,12 +1,73 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   FileText, Image as ImageIcon, FileCode, CheckCircle, Clock, AlertCircle,
   Search, Send, UploadCloud, Trash2, Plus, Sparkles, Folder,
-  Link2, Settings
+  Link2, Settings, Download
 } from 'lucide-react';
 import { GlimmerSkeleton } from './components/LazyLoader';
+import { initEmbeddingsEngine, generateLocalEmbedding, generateLocalEmbeddingsBatch } from './utils/embeddings';
+import {
+  computeTextHash,
+  getCachedEmbedding,
+  cacheEmbedding
+} from './utils/embeddingsCache';
+import {
+  buildDocumentSummary,
+  buildEnhancedContext,
+  buildSmartChunks
+} from './utils/documentIntelligence';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+
+const getStatusBadgeStyles = (status) => {
+  switch (status) {
+    case 'processed':
+      return {
+        bg: 'rgba(16,185,129,0.1)',
+        color: '#34d399',
+        icon: <CheckCircle size={10} />,
+        label: 'processed'
+      };
+    case 'indexed_text':
+      return {
+        bg: 'rgba(96,165,250,0.1)',
+        color: '#60a5fa',
+        icon: <CheckCircle size={10} />,
+        label: 'text indexed'
+      };
+    case 'indexing_vectors':
+      return {
+        bg: 'rgba(245,158,11,0.1)',
+        color: '#fbbf24',
+        icon: <Clock size={10} />,
+        label: 'indexing vectors'
+      };
+    case 'processing':
+      return {
+        bg: 'rgba(245,158,11,0.1)',
+        color: '#fbbf24',
+        icon: <Clock size={10} />,
+        label: 'processing'
+      };
+    default:
+      return {
+        bg: 'rgba(239,68,68,0.1)',
+        color: '#f87171',
+        icon: <AlertCircle size={10} />,
+        label: status || 'failed'
+      };
+  }
+};
+
+
+const isDesktop = () => {
+  return typeof window !== 'undefined' && window.__TAURI_INTERNALS__ !== undefined;
+};
 
 const getBackendHost = () => {
+  // If running in Tauri desktop, always route to local Django
+  if (isDesktop()) {
+    return 'http://127.0.0.1:8000';
+  }
   // During local development, route to local Django
   if (import.meta.env.DEV) {
     return 'http://127.0.0.1:8000';
@@ -17,30 +78,53 @@ const getBackendHost = () => {
 
 const BACKEND_HOST = getBackendHost();
 const API_BASE = `${BACKEND_HOST}/api`;
+const SERVER_PROCESS_ENDPOINT = `${API_BASE}/documents/process/`;
 
-const DEFAULT_MODELS = [
-  { name: 'qwen2.5:1.5b', size: '986 MB', description: 'Default lightweight LLM — fast & memory-efficient.', installed: true, is_default: true },
-  { name: 'llama3.2:3b', size: '2.0 GB', description: 'Meta Llama 3.2 lightweight multilingual model.', installed: false, is_default: false },
-  { name: 'qwen3.5:4b', size: '2.6 GB', description: 'Balanced medium-sized model for complex reasoning.', installed: false, is_default: false },
-  { name: 'qwen2.5:7b-instruct', size: '4.4 GB', description: 'Premium 7B model — exceptional reasoning and Russian language support.', installed: false, is_default: false },
-  { name: 'gemma4:e2b', size: '6.7 GB', description: "Google's Gemma E2B optimized variant.", installed: true, is_default: false }
-];
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp']);
 
-const normalizeModelName = (modelName) => {
-  return DEFAULT_MODELS.some(model => model.name === modelName) ? modelName : 'qwen2.5:1.5b';
+const getFilename = (filePath) => filePath.split('/').pop() || filePath.split('\\').pop() || 'document';
+
+const getExtension = (filename) => filename.split('.').pop()?.toLowerCase() || '';
+
+const inferFileType = (filename) => {
+  const extension = getExtension(filename);
+  if (IMAGE_EXTENSIONS.has(extension)) return 'image';
+  if (extension === 'pdf') return 'pdf';
+  if (extension === 'md' || extension === 'markdown') return 'markdown';
+  return 'text';
+};
+
+const normalizeLocalDocument = (doc) => {
+  if (!doc) return {};
+  return {
+    id: doc.id || '',
+    filename: doc.filename || '',
+    file_type: doc.file_type || doc.fileType || '',
+    status: doc.status || 'pending',
+    summary: doc.summary || doc.description || '',
+    suggested_title: doc.suggested_title || doc.suggestedTitle || doc.filename || '',
+    category: doc.category || 'General',
+    tags: Array.isArray(doc.tags) ? doc.tags : [],
+    file_path: doc.file_path || doc.filePath || doc.file || '',
+    created_at: doc.created_at || doc.createdAt || new Date().toISOString(),
+    updated_at: doc.updated_at || doc.updatedAt || new Date().toISOString(),
+    file: doc.file || doc.file_path || doc.filePath || '',
+  };
 };
 
 const getFileUrl = (filePath) => {
   if (!filePath) return '';
   if (filePath.startsWith('http://') || filePath.startsWith('https://')) return filePath;
+  if (isDesktop() && (filePath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(filePath))) {
+    return convertFileSrc(filePath, 'asset');
+  }
   return `${BACKEND_HOST}${filePath}`;
 };
 
 const getPdfPreviewUrl = (filePath) => {
   const fileUrl = getFileUrl(filePath);
   if (!fileUrl) return '';
-  const separator = fileUrl.includes('#') ? '&' : '#';
-  return `${fileUrl}${separator}pagemode=none&navpanes=0&zoom=page-width`;
+  return fileUrl;
 };
 
 const isMissingSummary = (summary) => {
@@ -58,7 +142,7 @@ const getSummaryText = (doc) => {
   if (!isMissingSummary(doc.summary)) {
     return doc.summary;
   }
-  if (doc.status === 'pending' || doc.status === 'processing') {
+  if (doc.status === 'pending' || doc.status === 'processing' || doc.status === 'indexing_vectors' || doc.status === 'indexed_text') {
     return 'AI summary is being generated as part of document processing.';
   }
   return 'AI summary has not been generated for this document yet.';
@@ -77,6 +161,16 @@ const isDebugMode = () => {
 export default function App() {
   const debugMode = isDebugMode();
 
+  // Authentication State
+  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('user_token'));
+
+  // Offline Semantic Engine BGE-M3 States
+  const [modelLoadingProgress, setModelLoadingProgress] = useState(0);
+  const [modelLoadingLabel, setModelLoadingLabel] = useState('Preparing download');
+  const [modelLoadingError, setModelLoadingError] = useState('');
+  const [isModelReady, setIsModelReady] = useState(false);
+  const [isModelDownloading, setIsModelDownloading] = useState(false);
+
   // Core Application State
   const [documents, setDocuments] = useState([]);
   const [chatSessions, setChatSessions] = useState([]);
@@ -84,7 +178,6 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
-  const [selectedCategory] = useState('');
 
   // Document Preview & Overlay Search States
   const [selectedDocId, setSelectedDocId] = useState(null);
@@ -96,7 +189,6 @@ export default function App() {
   const [isSearching, setIsSearching] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
-  const [isSummarizingDoc, setIsSummarizingDoc] = useState(false);
   const [activeSourcePopov, setActiveSourcePopov] = useState(null); // referenced document detail popover
 
   // OCR & Local Workspace States
@@ -106,11 +198,7 @@ export default function App() {
   // Settings & Theme States
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState('general'); // 'general' or 'models'
-  const [activeModel, setActiveModel] = useState(normalizeModelName(localStorage.getItem('activeModel') || 'qwen2.5:1.5b'));
-  const [modelsList, setModelsList] = useState(DEFAULT_MODELS);
-  const [downloadingModel, setDownloadingModel] = useState(null);
-  const [downloadProgress, setDownloadProgress] = useState(null);
+  const [settingsTab, setSettingsTab] = useState('general'); // 'general' or 'account'
 
   // Refs
   const chatBottomRef = useRef(null);
@@ -142,129 +230,256 @@ export default function App() {
     }, 100);
   }, []);
 
-  // Sync active model with localStorage
-  useEffect(() => {
-    localStorage.setItem('activeModel', activeModel);
-  }, [activeModel]);
-
-  const fetchModels = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/models/`);
-      if (res.ok) {
-        const data = await res.json();
-        // API returns { models: [...] } wrapper object
-        const nextModels = Array.isArray(data) ? data : (data.models || []);
-        setModelsList(nextModels.length > 0 ? nextModels : DEFAULT_MODELS);
+  const initLocalEngine = useCallback(async () => {
+      // BGE-M3 only runs offline if we are in desktop/Tauri mode, 
+      // but let's initialize it if isDesktop() is true.
+      if (isDesktop()) {
+        setIsModelDownloading(true);
+        setModelLoadingError('');
+        setModelLoadingProgress(1);
+        setModelLoadingLabel('Preparing download');
+        try {
+          await initEmbeddingsEngine((event) => {
+            const progress = typeof event === 'number' ? event : event?.progress;
+            const label = typeof event === 'number' ? null : event?.label;
+            setModelLoadingProgress(Number.isFinite(progress) ? progress : 1);
+            if (label) setModelLoadingLabel(label);
+          });
+          setIsModelReady(true);
+          setModelLoadingProgress(100);
+          setModelLoadingLabel('Semantic engine ready');
+        } catch (err) {
+          console.error("Local BGE-M3 embeddings model failed to load:", err);
+          setModelLoadingError(err?.message || 'Failed to download the local BGE-M3 model.');
+        } finally {
+          setIsModelDownloading(false);
+        }
+      } else {
+        // Fallback for non-desktop browser mockup
+        setIsModelReady(true);
       }
+  }, []);
+
+  // Initialize local embeddings engine BGE-M3 (React side)
+  useEffect(() => {
+    let isMounted = true;
+    const run = async () => {
+      if (!isMounted) return;
+      await initLocalEngine();
+    };
+    run();
+    return () => {
+      isMounted = false;
+    };
+  }, [initLocalEngine]);
+
+  const refreshLocalDocuments = async () => {
+    if (!isDesktop()) {
+      setDocuments([]);
+      return [];
+    }
+
+    const localDocs = await invoke('list_local_documents');
+    const staleBgeFailures = localDocs.filter(doc =>
+      doc.status === 'failed' &&
+      String(doc.summary || '').includes('https://huggingface.co/BAAI/bge-m3/')
+    );
+    for (const staleDoc of staleBgeFailures) {
+      try {
+        await invoke('delete_local_document', { documentId: staleDoc.id });
+      } catch (err) {
+        console.warn("Failed to remove stale BGE-M3 download error document", err);
+      }
+    }
+
+    const normalized = localDocs
+      .filter(doc => !staleBgeFailures.some(staleDoc => staleDoc.id === doc.id))
+      .map(normalizeLocalDocument);
+    setDocuments(normalized);
+    return normalized;
+  };
+
+  const saveLocalDocument = async (doc) => {
+    const normalized = normalizeLocalDocument(doc);
+    await invoke('upsert_local_document', { document: normalized });
+    setDocuments(prev => {
+      return [normalized, ...prev.filter(item => item.id !== normalized.id)];
+    });
+    if (selectedDocId === normalized.id) {
+      setSelectedDocDetails(prev => normalizeLocalDocument({
+        ...(prev || {}),
+        ...normalized,
+        chunks: prev?.chunks || []
+      }));
+    }
+    return normalized;
+  };
+
+  const buildUploadFileFromPath = async (filePath) => {
+    const localFile = await invoke('read_file_bytes', { path: filePath });
+    const bytes = new Uint8Array(localFile.bytes);
+    return new File([bytes], localFile.filename || getFilename(filePath), {
+      type: 'application/octet-stream'
+    });
+  };
+
+  const processFileOnServer = async (filePath, fileObject) => {
+    console.log("🖥️ [Recall App] [Stage 1] processFileOnServer initiated:", { filePath, hasFileObject: !!fileObject });
+    const formData = new FormData();
+    const uploadFileObject = fileObject || await buildUploadFileFromPath(filePath);
+    formData.append('file', uploadFileObject);
+
+    console.log(`📤 [Recall App] [Stage 1] Sending POST to stateless server endpoint: ${SERVER_PROCESS_ENDPOINT}`);
+    const startTime = Date.now();
+    try {
+      const res = await fetch(SERVER_PROCESS_ENDPOINT, {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await res.json();
+      const duration = Date.now() - startTime;
+      if (!res.ok) {
+        console.error(`❌ [Recall App] [Stage 1] Server OCR request failed after ${duration}ms:`, data.error || 'Server fallback processing failed');
+        throw new Error(data.error || 'Server fallback processing failed');
+      }
+      console.log(`📥 [Recall App] [Stage 1] Server OCR response received successfully in ${duration}ms:`, {
+        suggested_title: data.suggested_title,
+        category: data.category,
+        tags: data.tags,
+        textLength: data.text?.length || 0,
+        chunksCount: data.chunks?.length || 0
+      });
+      return data;
     } catch (err) {
-      console.warn("Failed to fetch models from local backend", err);
+      console.error(`❌ [Recall App] [Stage 1] Server OCR fallback request threw exception:`, err);
+      throw err;
     }
   };
 
-  const handleDownloadModel = async (modelName) => {
-    if (downloadingModel) return;
+  const normalizeIndexedChunks = (filename, text, chunks = []) => {
+    if (!Array.isArray(chunks) || chunks.length === 0) {
+      return buildSmartChunks(text, { filename });
+    }
 
-    try {
-      const response = await fetch(`${API_BASE}/models/pull/?model=${modelName}`);
+    if (typeof chunks[0] === 'string') {
+      return buildSmartChunks(chunks.join('\n\n'), { filename });
+    }
 
-      if (!response.ok) throw new Error("Backend download stream closed unexpectedly");
+    return chunks.map((chunk, index) => ({
+      content: chunk.content || chunk.text || '',
+      chunk_index: Number.isFinite(chunk.chunk_index) ? chunk.chunk_index : index,
+      prev_chunk_index: index > 0 ? index - 1 : null,
+      next_chunk_index: index < chunks.length - 1 ? index + 1 : null,
+      page_number: chunk.page_number || 1,
+      section_title: chunk.section_title || 'Document',
+      section_index: chunk.section_index || 0,
+      content_type: chunk.content_type || 'paragraph',
+      keywords: Array.isArray(chunk.keywords) ? chunk.keywords : [],
+      entities: chunk.entities || {},
+      filename
+    })).filter(chunk => chunk.content.trim());
+  };
 
-      setDownloadingModel(modelName);
-      setDownloadProgress(0);
+  const persistLocalChunks = async (documentId, filename, chunks) => {
+    console.log(`🏎️ [Recall App] [Stage 2] persistLocalChunks called for document: ${documentId} ("${filename}") with ${chunks.length} chunks.`);
+    const dbChunks = [];
+    const chunksToEmbed = [];
+    const chunkIndicesToEmbed = [];
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+    console.log("💾 [Recall App] [Stage 2] Checking IndexedDB local embeddings cache for duplicate chunks...");
+    // Step 1: Query IndexedDB cache for every chunk hash
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = typeof chunks[i] === 'string'
+        ? { content: chunks[i], chunk_index: i, filename }
+        : chunks[i];
+      const chunkTextContent = chunk.content || chunk.text || '';
+      if (!chunkTextContent.trim()) continue;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const hash = await computeTextHash(chunkTextContent);
+      const cachedVector = await getCachedEmbedding(hash);
+      
+      console.log(`🔄 [Recall App] [Stage 2] Chunk [${i}] cache check: hash = ${hash}. Found in cache? ${!!cachedVector}`);
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
+      dbChunks.push({
+        id: `chunk-${documentId}-${i}`,
+        document_id: documentId,
+        text: chunkTextContent,
+        vector: cachedVector,
+        hash,
+        metadata: {
+          ...chunk,
+          content: undefined,
+          text: undefined,
+          chunk_index: i,
+          filename,
+          created_at: new Date().toISOString()
+        }
+      });
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const jsonStr = line.slice(6).trim();
-            if (!jsonStr) continue;
-            try {
-              const data = JSON.parse(jsonStr);
-              if (data.error) {
-                console.error("Ollama pull error:", data.error);
-                alert(`Download failed: ${data.error}`);
-                setDownloadingModel(null);
-                setDownloadProgress(null);
-                return;
-              }
-              if (data.status === 'success') {
-                setDownloadProgress(100);
-                setTimeout(() => {
-                  setDownloadingModel(null);
-                  setDownloadProgress(null);
-                  fetchModels();
-                }, 1000);
-                return;
-              }
-              if (data.completed && data.total) {
-                const percentage = Math.round((data.completed / data.total) * 100);
-                setDownloadProgress(percentage);
-              }
-            } catch (e) {
-              console.debug("Error parsing SSE line", e);
-            }
+      if (!cachedVector) {
+        chunksToEmbed.push(chunkTextContent);
+        chunkIndicesToEmbed.push(dbChunks.length - 1);
+      }
+    }
+
+    const cachedHitsCount = dbChunks.length - chunksToEmbed.length;
+    console.log(`📊 [Recall App] [Stage 2] Cache search finished. Total valid chunks: ${dbChunks.length}. Cache hits (reused): ${cachedHitsCount}. Cache misses (needs embedding): ${chunksToEmbed.length}.`);
+
+    // Step 2: Compute remaining vectors in batches off main thread
+    if (chunksToEmbed.length > 0) {
+      console.log(`🛰️ [Recall App] [Stage 2] Dispatching ${chunksToEmbed.length} chunks to stateless server for batch embeddings generation using BGE-M3 model...`);
+      const BATCH_SIZE = 16;
+      const totalBatches = Math.ceil(chunksToEmbed.length / BATCH_SIZE);
+      console.log(`📨 [Recall App] [Stage 2] Batch processing in chunks of size ${BATCH_SIZE}. Total batches: ${totalBatches}`);
+
+      for (let offset = 0; offset < chunksToEmbed.length; offset += BATCH_SIZE) {
+        const batchTexts = chunksToEmbed.slice(offset, offset + BATCH_SIZE);
+        const batchIndices = chunkIndicesToEmbed.slice(offset, offset + BATCH_SIZE);
+        const currentBatchNum = Math.floor(offset / BATCH_SIZE) + 1;
+
+        console.log(`🚀 [Recall App] [Stage 2] Requesting server embeddings batch ${currentBatchNum}/${totalBatches}: offset = ${offset}, batch size = ${batchTexts.length}`);
+        
+        const startTime = Date.now();
+        const batchVectors = await generateLocalEmbeddingsBatch(batchTexts);
+        const duration = Date.now() - startTime;
+
+        console.log(`📡 [Recall App] [Stage 2] Server embeddings batch ${currentBatchNum}/${totalBatches} response received in ${duration}ms. Received ${batchVectors.length} vectors.`);
+
+        for (let j = 0; j < batchVectors.length; j++) {
+          const dbChunkIndex = batchIndices[j];
+          const vector = batchVectors[j];
+          dbChunks[dbChunkIndex].vector = vector;
+
+          if (vector) {
+            // Save vector to IndexedDB cache for subsequent imports
+            await cacheEmbedding(dbChunks[dbChunkIndex].hash, vector);
           }
         }
       }
-    } catch (err) {
-      console.error("Error pulling model", err);
-      alert(`Connection failed: ${err.message || 'Check Ollama server'}`);
-      setDownloadingModel(null);
-      setDownloadProgress(null);
-    }
-  };
-
-  const handleActivateModel = (modelName) => {
-    const model = modelsList.find(m => m.name === modelName);
-    if (model && model.installed) {
-      setActiveModel(modelName);
+      console.log(`💾 [Recall App] [Stage 2] All new vectors successfully computed and cached in IndexedDB.`);
     } else {
-      alert("Please download the model before activating.");
-    }
-  };
-
-  const handleDeleteModel = async (modelName) => {
-    if (modelName === 'qwen2.5:1.5b' && activeModel === 'qwen2.5:1.5b') {
-      alert("Cannot delete the default active model.");
-      return;
-    }
-    if (activeModel === modelName) {
-      alert("Cannot delete the currently active model. Switch to another model first.");
-      return;
+      console.log("♻️ [Recall App] [Stage 2] All chunks were found in cache! Zero server roundtrips required.");
     }
 
-    if (!window.confirm(`Are you sure you want to delete ${modelName}?`)) {
-      return;
-    }
+    // Map metadata to JSON strings for compatibility with Tauri / LanceDB
+    const formattedDbChunks = dbChunks.map(chunk => ({
+      id: chunk.id,
+      document_id: chunk.document_id,
+      text: chunk.text,
+      vector: chunk.vector,
+      metadata: JSON.stringify(chunk.metadata)
+    }));
 
-    try {
-      const res = await fetch(`${API_BASE}/models/delete/`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ name: modelName })
-      });
-      if (res.ok) {
-        await fetchModels();
-      } else {
-        const err = await res.json();
-        alert(`Failed to delete model: ${err.error || 'Unknown error'}`);
-      }
-    } catch (err) {
-      console.error("Error deleting model", err);
-      alert("Failed to connect to backend to delete model.");
-    }
+    console.log(`💾 [Recall App] [Stage 2] Writing all ${formattedDbChunks.length} chunks with BGE-M3 vectors to LanceDB via Tauri invoke('insert_document_chunks')...`);
+    
+    const dbStartTime = Date.now();
+    await invoke('insert_document_chunks', {
+      documentId: documentId,
+      chunks: formattedDbChunks
+    });
+    
+    console.log(`✅ [Recall App] [Stage 2] LanceDB insertion completed successfully in ${Date.now() - dbStartTime}ms.`);
   };
 
   // Initial local workspace data fetch
@@ -273,10 +488,7 @@ export default function App() {
 
     const loadWorkspaceData = async () => {
       try {
-        const docRes = await fetch(`${API_BASE}/documents/`);
-        if (!docRes.ok) throw new Error("Backend unreachable");
-
-        const docData = await docRes.json();
+        const docData = await refreshLocalDocuments();
         if (!isMounted) return;
         setDocuments(docData);
 
@@ -313,9 +525,8 @@ export default function App() {
             ]);
           }
         }
-        await fetchModels();
       } catch (err) {
-        console.warn("Django backend is unavailable.", err);
+        console.warn("Workspace initialization failed.", err);
       }
     };
 
@@ -325,59 +536,228 @@ export default function App() {
     };
   }, []);
 
-  // File Upload Handlers
+  // File Ingestion & Local Indexing Handlers
   const handleFileDrop = (e) => {
     e.preventDefault();
     setIsDragOver(false);
     const files = e.dataTransfer.files;
     if (files.length > 0) {
-      uploadFile(files[0]);
+      const file = files[0];
+      // In Tauri 2.0, dropped files expose their absolute path via file.path property!
+      if (isDesktop() && file.path) {
+        uploadLocalFile(file.path, file);
+      } else {
+        uploadFile(file);
+      }
     }
   };
 
-  const triggerUpload = () => {
+  const triggerUpload = async () => {
+    if (isDesktop()) {
+      try {
+        const filePath = await invoke('select_local_file');
+        if (filePath) {
+          // Native file dialog does not return a JS File object, but we pass null and
+          // let the pipeline index it locally + register it on the metadata server
+          await uploadLocalFile(filePath, null);
+        }
+      } catch (err) {
+        console.error("Native file select failed:", err);
+        alert("Failed to open native dialog: " + err.message);
+      }
+      return;
+    }
     fileInputRef.current?.click();
   };
 
   const handleFileSelect = (e) => {
     const files = e.target.files;
     if (files && files.length > 0) {
-      uploadFile(files[0]);
+      const file = files[0];
+      // Try to get path if available (highly platform dependent for web inputs)
+      if (isDesktop() && file.path) {
+        uploadLocalFile(file.path, file);
+      } else {
+        uploadFile(file);
+      }
     }
   };
 
-  const uploadFile = async (file) => {
+  // Local-first, offline-ready document ingestion pipeline
+  const uploadLocalFile = async (filePath, fileObject) => {
     setIsUploading(true);
+    const filename = getFilename(filePath || fileObject?.name || 'document');
+    const extension = getExtension(filename);
+    const now = new Date().toISOString();
+    const newDocId = `local-${Date.now()}`;
+
+    console.log("📂 [Recall App] [Stage 0] File upload initiated:", { filePath, filename, extension, now, newDocId });
 
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-
-      const res = await fetch(`${API_BASE}/documents/`, {
-        method: 'POST',
-        body: formData
+      // Stage 0: Initial record creation
+      let localDoc = await saveLocalDocument({
+        id: newDocId,
+        filename,
+        file_type: inferFileType(filename),
+        status: 'processing',
+        summary: '',
+        suggested_title: filename,
+        category: 'General',
+        tags: [],
+        file_path: filePath || '',
+        created_at: now,
+        updated_at: now
+      });
+      setSelectedDocId(newDocId);
+      setSelectedDocDetails({
+        ...localDoc,
+        chunks: []
       });
 
-      if (!res.ok) throw new Error("Failed to upload document");
+      console.log("📝 [Recall App] [Stage 0] Initial document record registered in LanceDB:", localDoc);
 
-      const newDoc = await res.json();
-      setDocuments(prev => [newDoc, ...prev]);
+      let text = '';
+      let chunks = [];
+      let metadata = {};
+      const mustUseServerFallback = IMAGE_EXTENSIONS.has(extension);
 
-      // Periodically poll document list to check status transition
-      const interval = setInterval(async () => {
-        const pollRes = await fetch(`${API_BASE}/documents/${newDoc.id}/`);
-        const updatedDoc = await pollRes.json();
-        if (updatedDoc.status === 'processed' || updatedDoc.status === 'failed') {
-          clearInterval(interval);
-          setDocuments(prev => prev.map(d => d.id === newDoc.id ? updatedDoc : d));
+      console.log("🔍 [Recall App] [Stage 1] Extracting text content. Server fallback required?", mustUseServerFallback);
+
+      // Perform text extraction
+      if (!mustUseServerFallback) {
+        try {
+          console.log("⚙️ [Recall App] [Stage 1] Parsing file locally via Tauri IPC invoke('parse_file')...");
+          text = await invoke('parse_file', { path: filePath });
+          
+          console.log(`✅ [Recall App] [Stage 1] Local file parsing complete. Extracted ${text.length} characters.`);
+          
+          console.log(`🧩 [Recall App] [Stage 1] Building smart chunks locally...`);
+          chunks = buildSmartChunks(text, { filename });
+          
+          console.log(`📦 [Recall App] [Stage 1] Chunks generated locally: ${chunks.length} chunks.`);
+
+          if (!text.trim() || chunks.length === 0) {
+            throw new Error("Extracted file content is empty or unsupported.");
+          }
+        } catch (localErr) {
+          console.warn("⚠️ [Recall App] [Stage 1] Local parse/index failed or returned empty content; using stateless server OCR fallback.", localErr);
+          text = '';
+          chunks = [];
+          metadata = await processFileOnServer(filePath, fileObject);
         }
-      }, 3000);
+      } else {
+        console.log("🖥️ [Recall App] [Stage 1] File requires server-side handling (e.g. image OCR). Processing on server...");
+        metadata = await processFileOnServer(filePath, fileObject);
+      }
 
+      if (metadata.text || metadata.chunks) {
+        text = metadata.text || '';
+        chunks = Array.isArray(metadata.chunks) && metadata.chunks.length > 0
+          ? normalizeIndexedChunks(filename, text, metadata.chunks)
+          : buildSmartChunks(text, { filename });
+        
+        console.log(`📦 [Recall App] [Stage 1] Received parsed content stats: character length = ${text.length}, chunk count = ${chunks.length}`);
+        
+        if (chunks.length === 0) {
+          throw new Error("Server fallback did not return indexable text chunks.");
+        }
+      }
+
+      // Stage 1: Document Text is Fully Extracted & Summary/Preview is Available!
+      console.log("✍️ [Recall App] [Stage 1] Saving intermediate 'indexed_text' document status...");
+      const indexedDoc = await saveLocalDocument({
+        ...localDoc,
+        status: 'indexed_text',
+        summary: metadata.summary || localDoc.summary || buildDocumentSummary(filename, text, chunks),
+        suggested_title: metadata.suggested_title || filename,
+        category: metadata.category || 'General',
+        tags: Array.isArray(metadata.tags) ? metadata.tags : ['AI-Ingested'],
+        updated_at: new Date().toISOString()
+      });
+
+      console.log("✨ [Recall App] [Stage 1 Complete] Intermediate metadata & text preview saved:", indexedDoc);
+
+      // INSTANTLY enable preview in the UI and allow user interaction!
+      setSelectedDocId(newDocId);
+      setSelectedDocDetails({
+        ...indexedDoc,
+        chunks: chunks.map((chunk, index) => ({
+          id: `chunk-${newDocId}-${index}`,
+          document_id: newDocId,
+          content: chunk.content || chunk.text || '',
+          chunk_index: index,
+          metadata: JSON.stringify(chunk)
+        }))
+      });
+
+      // Stop global loading spinner - UI is now fluid and ready!
+      setIsUploading(false);
+
+      // Stage 2: Background Vector Indexing
+      console.log("⚡ [Recall App] [Stage 2] Starting background vector indexing pipeline. Status set to 'indexing_vectors'...");
+      let indexingDoc = await saveLocalDocument({
+        ...indexedDoc,
+        status: 'indexing_vectors',
+        updated_at: new Date().toISOString()
+      });
+
+      // Perform background batch embeddings calculation and persist to LanceDB
+      await persistLocalChunks(newDocId, filename, chunks);
+
+      // Stage 3: Indexing fully complete!
+      console.log("🌟 [Recall App] [Stage 3] Completing indexing pipeline. Setting status to 'processed'...");
+      const processedDoc = await saveLocalDocument({
+        ...indexingDoc,
+        status: 'processed',
+        updated_at: new Date().toISOString()
+      });
+
+      // Refresh final details with chunks database links
+      try {
+        const detail = await invoke('get_local_document', { documentId: newDocId });
+        if (selectedDocId === newDocId) {
+          setSelectedDocDetails(normalizeLocalDocument(detail));
+        }
+      } catch {
+        if (selectedDocId === newDocId) {
+          setSelectedDocDetails({
+            ...processedDoc,
+            chunks: chunks.map((chunk, index) => ({
+              id: `chunk-${newDocId}-${index}`,
+              document_id: newDocId,
+              content: chunk.content || chunk.text || '',
+              chunk_index: index,
+              metadata: JSON.stringify(chunk)
+            }))
+          });
+        }
+      }
+
+      console.log(`🏆 [Recall App] [Stage 3 Complete] Document "${filename}" successfully indexed and processed locally in the background!`, processedDoc);
     } catch (err) {
-      alert(err.message);
-    } finally {
+      console.error("🔴 [Recall App] [Ingestion Error] Local document ingestion pipeline failed:", err);
+      await saveLocalDocument({
+        id: newDocId,
+        filename,
+        file_type: inferFileType(filename),
+        status: 'failed',
+        summary: err.message,
+        suggested_title: filename,
+        category: 'General',
+        tags: [],
+        file_path: filePath || '',
+        created_at: now,
+        updated_at: new Date().toISOString()
+      });
+      console.log("🚨 [Recall App] Document status set to 'failed'. Summary updated with error details.");
+      alert("Failed to index local document: " + err.message);
       setIsUploading(false);
     }
+  };
+
+  // Browser mode cannot satisfy client-first LanceDB indexing because Rust IPC is unavailable.
+  const uploadFile = async (file) => {
+    alert(`Client-first indexing requires the desktop app. Could not index ${file?.name || 'this file'} in browser mode.`);
   };
 
   const handleSelectDocument = async (doc) => {
@@ -386,10 +766,15 @@ export default function App() {
     setSelectedDocDetails(null);
 
     try {
-      const res = await fetch(`${API_BASE}/documents/${doc.id}/`);
-      if (!res.ok) throw new Error("Failed to fetch document details");
-      const data = await res.json();
-      setSelectedDocDetails(data);
+      if (isDesktop()) {
+        const data = await invoke('get_local_document', { documentId: doc.id });
+        setSelectedDocDetails(normalizeLocalDocument(data));
+      } else {
+        setSelectedDocDetails({
+          ...doc,
+          chunks: []
+        });
+      }
     } catch (err) {
       console.error("Error fetching doc details:", err);
       setSelectedDocDetails({
@@ -401,39 +786,18 @@ export default function App() {
     }
   };
 
-  const handleSummarizeDocument = async () => {
-    if (!selectedDocDetails || isSummarizingDoc) return;
-
-    setIsSummarizingDoc(true);
-    try {
-      const res = await fetch(`${API_BASE}/documents/${selectedDocDetails.id}/summarize/`, {
-        method: 'POST'
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to generate AI summary");
-      }
-
-      setSelectedDocDetails(data);
-      setDocuments(prev => prev.map(doc => doc.id === data.id ? data : doc));
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setIsSummarizingDoc(false);
-    }
-  };
-
   const handleDeleteDoc = async (docId, e) => {
     e.stopPropagation();
     if (!confirm("Are you sure you want to delete this document?")) return;
 
     try {
-      const res = await fetch(`${API_BASE}/documents/${docId}/`, {
-        method: 'DELETE'
-      });
-      if (res.ok) {
-        setDocuments(prev => prev.filter(d => d.id !== docId));
+      if (isDesktop()) {
+        await invoke('delete_local_document', { documentId: docId });
+      }
+      setDocuments(prev => prev.filter(d => d.id !== docId));
+      if (selectedDocId === docId) {
+        setSelectedDocId(null);
+        setSelectedDocDetails(null);
       }
     } catch (err) {
       alert("Error deleting document: " + err.message);
@@ -442,29 +806,56 @@ export default function App() {
 
   // Search API
   const handleSearch = async (e) => {
-    e.preventDefault();
+    if (e) e.preventDefault();
     if (!searchQuery.trim()) return;
 
     setIsSearching(true);
     setShowSearchDropdown(true);
 
-    try {
-      const res = await fetch(`${API_BASE}/search/semantic/`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ query: searchQuery, category: selectedCategory })
-      });
+    if (isDesktop()) {
+      try {
+        // 1. Generate query vector using offline BGE-M3
+        const queryVector = await generateLocalEmbedding(searchQuery);
 
-      if (!res.ok) throw new Error("Search execution failed");
-      const data = await res.json();
-      setSearchResults(data.results || []);
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setIsSearching(false);
+        // 2. Invoke local LanceDB vector search command in Tauri
+        const localResults = await invoke('search_local_vectors', {
+          queryVector: queryVector,
+          limit: 10
+        });
+
+        // 3. Map local results to what the frontend UI expects
+        const mappedResults = localResults.map(item => {
+          const matchingDoc = documents.find(d => d.id === item.document_id);
+          // LanceDB L2 distance: score = 2 * (1 - cosine_similarity) for normalized vectors
+          // similarity = 1 - (score / 2)
+          const similarity = Math.max(0.1, Math.min(1.0, 1.0 - (item.score / 2.0)));
+          return {
+            id: item.id,
+            document_id: item.document_id,
+            category: matchingDoc?.category || 'General',
+            suggested_title: matchingDoc?.suggested_title || matchingDoc?.filename || 'Document Chunk',
+            filename: matchingDoc?.filename || 'document.pdf',
+            similarity: similarity,
+            content: item.text,
+            metadata: item.metadata
+          };
+        });
+
+        // 4. Sort local results by similarity descending
+        mappedResults.sort((a, b) => b.similarity - a.similarity);
+
+        setSearchResults(mappedResults);
+      } catch (err) {
+        console.error("Local semantic search failed:", err);
+        alert("Local search error: " + err.message);
+      } finally {
+        setIsSearching(false);
+      }
+      return;
     }
+
+    alert("Client-first semantic search requires the desktop app and local LanceDB index.");
+    setIsSearching(false);
   };
 
   // Chat API
@@ -498,6 +889,31 @@ export default function App() {
     }
   };
 
+  const getLocalChatContext = async (query) => {
+    if (!isDesktop()) return [];
+
+    try {
+      const queryVector = await generateLocalEmbedding(query);
+      const localResults = await invoke('search_local_vectors', {
+        queryVector,
+        limit: 50
+      });
+
+      return await buildEnhancedContext({
+        query,
+        vectorResults: localResults,
+        documents,
+        fetchDocumentDetail: async (documentId) => {
+          return await invoke('get_local_document', { documentId: documentId });
+        },
+        maxContextChars: 12000
+      });
+    } catch (err) {
+      console.warn("Failed to build local chat context; sending message without document context.", err);
+      return [];
+    }
+  };
+
   const handleSendMessage = async (e) => {
     e.preventDefault();
     if (!chatInput.trim()) return;
@@ -527,12 +943,13 @@ export default function App() {
         currentSessionId = newSession.id;
       }
 
+      const contextChunks = await getLocalChatContext(userText);
       const res = await fetch(`${API_BASE}/chat/session/${currentSessionId}/message/`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ content: userText, model: activeModel })
+        body: JSON.stringify({ content: userText, context_chunks: contextChunks })
       });
       if (!res.ok) throw new Error("Failed to append chat message");
       const data = await res.json();
@@ -566,11 +983,18 @@ export default function App() {
       case 'pdf':
         return (
           <div style={{ width: '100%', height: 'clamp(680px, 78vh, 960px)', borderRadius: '12px', overflow: 'hidden', border: '1px solid var(--panel-border)', background: 'var(--panel-bg-preview)', position: 'relative' }}>
-            <iframe
-              src={getPdfPreviewUrl(doc.file)}
-              style={{ width: '100%', height: '100%', border: 'none' }}
-              title={doc.suggested_title || doc.filename}
-            />
+            <object
+              data={getPdfPreviewUrl(doc.file)}
+              type="application/pdf"
+              style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
+              aria-label={doc.filename}
+            >
+              <iframe
+                src={getPdfPreviewUrl(doc.file)}
+                style={{ width: '100%', height: '100%', border: 'none' }}
+                title={doc.filename}
+              />
+            </object>
           </div>
         );
       case 'image':
@@ -591,7 +1015,7 @@ export default function App() {
           }}>
             <img
               src={fileUrl}
-              alt={doc.suggested_title || doc.filename}
+              alt={doc.filename}
               style={{
                 maxWidth: '100%',
                 maxHeight: '100%',
@@ -638,8 +1062,238 @@ export default function App() {
     }
   };
 
+  if (!isAuthenticated) {
+    return (
+      <div style={{
+        width: '100vw',
+        height: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: theme === 'light' ? '#f8fafc' : '#0f172a',
+        color: theme === 'light' ? '#1e293b' : '#f1f5f9',
+        fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+      }}>
+        <div className="glass-panel" style={{
+          width: '100%',
+          maxWidth: '400px',
+          padding: '2.5rem',
+          background: theme === 'light' ? 'rgba(255, 255, 255, 0.9)' : 'rgba(30, 41, 59, 0.9)',
+          border: theme === 'light' ? '1px solid rgba(0, 0, 0, 0.08)' : '1px solid rgba(255, 255, 255, 0.08)',
+          boxShadow: theme === 'light' ? '0 20px 40px rgba(0,0,0,0.06)' : '0 20px 40px rgba(0,0,0,0.3)',
+          borderRadius: '24px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: '1.75rem',
+          textAlign: 'center'
+        }}>
+          {/* Logo Brand */}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.75rem' }}>
+            <div style={{
+              background: 'linear-gradient(135deg, #7c3aed, #4f46e5)',
+              color: '#ffffff',
+              padding: '1rem',
+              borderRadius: '16px',
+              display: 'flex',
+              boxShadow: '0 10px 20px rgba(124, 58, 237, 0.25)'
+            }}>
+              <Sparkles size={36} />
+            </div>
+            <div>
+              <h1 style={{ fontSize: '1.75rem', fontWeight: '900', letterSpacing: '-0.03em', margin: 0, color: theme === 'light' ? '#111827' : '#ffffff' }}>
+                RecallOS
+              </h1>
+              <p style={{ fontSize: '0.85rem', color: theme === 'light' ? '#64748b' : '#94a3b8', marginTop: '0.25rem' }}>
+                Developer Authentication Portal
+              </p>
+            </div>
+          </div>
+
+          {/* Form */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const username = e.target.username.value.trim();
+              const password = e.target.password.value.trim();
+
+              if (username === 'admin' && password === 'admin') {
+                localStorage.setItem('user_token', 'mock-jwt-admin-token');
+                setIsAuthenticated(true);
+              } else {
+                alert("Invalid developer credentials! Use 'admin' / 'admin'.");
+              }
+            }}
+            style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '1.25rem', textAlign: 'left' }}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              <label htmlFor="username" style={{ fontSize: '0.75rem', fontWeight: '700', color: theme === 'light' ? '#475569' : '#cbd5e1', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Username
+              </label>
+              <input
+                id="username"
+                name="username"
+                type="text"
+                defaultValue="admin"
+                required
+                style={{
+                  padding: '0.85rem 1rem',
+                  borderRadius: '12px',
+                  border: '1px solid var(--panel-border)',
+                  background: 'var(--surface-subtle)',
+                  color: 'var(--text-primary)',
+                  fontSize: '0.95rem',
+                  outline: 'none',
+                  transition: 'var(--transition-fast)'
+                }}
+                onFocus={(e) => e.target.style.borderColor = '#7c3aed'}
+                onBlur={(e) => e.target.style.borderColor = 'var(--panel-border)'}
+              />
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              <label htmlFor="password" style={{ fontSize: '0.75rem', fontWeight: '700', color: theme === 'light' ? '#475569' : '#cbd5e1', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Password
+              </label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                defaultValue="admin"
+                required
+                style={{
+                  padding: '0.85rem 1rem',
+                  borderRadius: '12px',
+                  border: '1px solid var(--panel-border)',
+                  background: 'var(--surface-subtle)',
+                  color: 'var(--text-primary)',
+                  fontSize: '0.95rem',
+                  outline: 'none',
+                  transition: 'var(--transition-fast)'
+                }}
+                onFocus={(e) => e.target.style.borderColor = '#7c3aed'}
+                onBlur={(e) => e.target.style.borderColor = 'var(--panel-border)'}
+              />
+            </div>
+
+            <button
+              type="submit"
+              style={{
+                width: '100%',
+                padding: '0.85rem',
+                background: 'linear-gradient(135deg, #7c3aed, #4f46e5)',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '12px',
+                fontWeight: '700',
+                fontSize: '0.95rem',
+                cursor: 'pointer',
+                transition: 'var(--transition-smooth)',
+                boxShadow: '0 4px 14px rgba(124, 58, 237, 0.25)',
+                marginTop: '0.5rem'
+              }}
+              onMouseOver={(e) => e.target.style.transform = 'translateY(-1px)'}
+              onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
+            >
+              Sign In
+            </button>
+          </form>
+
+          {/* Footer Info */}
+          <div style={{ fontSize: '0.75rem', color: theme === 'light' ? '#94a3b8' : '#64748b', borderTop: '1px solid var(--panel-border)', paddingTop: '1rem', width: '100%' }}>
+            Dev Mode credentials: <strong>admin</strong> / <strong>admin</strong>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app-grid">
+      {(isModelDownloading || modelLoadingError) && !isModelReady && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: theme === 'light' ? 'rgba(255, 255, 255, 0.8)' : 'rgba(15, 23, 42, 0.8)',
+          backdropFilter: 'blur(20px)',
+          zIndex: 9999,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '2rem',
+          textAlign: 'center',
+          color: theme === 'light' ? '#1f2937' : '#f3f4f6'
+        }}>
+          <div className="glass-panel" style={{
+            padding: '2.5rem',
+            maxWidth: '450px',
+            width: '100%',
+            background: theme === 'light' ? 'rgba(255, 255, 255, 0.9)' : 'rgba(30, 41, 59, 0.9)',
+            border: theme === 'light' ? '1px solid rgba(0, 0, 0, 0.08)' : '1px solid rgba(255, 255, 255, 0.08)',
+            boxShadow: theme === 'light' ? '0 20px 40px rgba(0,0,0,0.06)' : '0 20px 40px rgba(0,0,0,0.3)',
+            borderRadius: '20px',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: '1.25rem'
+          }}>
+            <div style={{
+              background: modelLoadingError ? '#ef4444' : 'linear-gradient(135deg, #7c3aed, #4f46e5)',
+              color: '#ffffff',
+              padding: '1rem',
+              borderRadius: '16px',
+              display: 'flex',
+              boxShadow: modelLoadingError ? '0 10px 20px rgba(239, 68, 68, 0.2)' : '0 10px 20px rgba(124, 58, 237, 0.2)'
+            }}>
+              {modelLoadingError ? <AlertCircle size={28} /> : <Download size={28} className="animate-bounce" />}
+            </div>
+            <div>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: '800', marginBottom: '0.5rem', color: theme === 'light' ? '#111827' : '#f9fafb' }}>
+                {modelLoadingError ? 'Semantic Engine Download Failed' : 'Downloading Semantic Engine'}
+              </h2>
+              <p style={{ fontSize: '0.875rem', color: theme === 'light' ? '#4b5563' : '#9ca3af', lineHeight: '1.5' }}>
+                {modelLoadingError || 'We are configuring the local multilingual BGE-M3 model for fully offline semantic search (~560 MB). This only happens once.'}
+              </p>
+            </div>
+            <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', fontWeight: '700', color: modelLoadingError ? '#ef4444' : '#7c3aed' }}>
+                <span>{modelLoadingError ? 'Check connection and retry' : modelLoadingLabel}</span>
+                <span>{modelLoadingProgress}%</span>
+              </div>
+              <div style={{
+                width: '100%',
+                height: '8px',
+                background: theme === 'light' ? '#e5e7eb' : '#334155',
+                borderRadius: '4px',
+                overflow: 'hidden'
+              }}>
+                <div style={{
+                  width: `${modelLoadingProgress}%`,
+                  height: '100%',
+                  background: 'linear-gradient(to right, #7c3aed, #4f46e5)',
+                  transition: 'width 0.2s ease-out',
+                  borderRadius: '4px'
+                }} />
+              </div>
+              {modelLoadingError && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={initLocalEngine}
+                  style={{ alignSelf: 'center', marginTop: '1rem' }}
+                >
+                  Retry Download
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 1. Left Panel: Library & Ingestion */}
       <aside className="glass-panel" style={{
         margin: '0.75rem', marginRight: '0', display: 'flex', flexDirection: 'column',
@@ -654,15 +1308,6 @@ export default function App() {
             <span style={{ fontWeight: '800', letterSpacing: '-0.02em', fontSize: '1.1rem' }}>RecallOS</span>
           </div>
 
-          <div style={{ display: 'flex', gap: '0.25rem' }}>
-            <span style={{
-              fontSize: '0.65rem', padding: '0.2rem 0.4rem', borderRadius: '4px',
-              background: 'rgba(16, 185, 129, 0.15)',
-              color: '#10b981', fontWeight: '700'
-            }}>
-              LOCAL
-            </span>
-          </div>
         </div>
 
         {/* Drag and Drop File Area */}
@@ -736,7 +1381,7 @@ export default function App() {
                   </div>
                   <div style={{ flex: '1', minWidth: '0' }}>
                     <div style={{ fontSize: '0.85rem', fontWeight: '700', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {doc.suggested_title || doc.filename}
+                      {doc.filename}
                     </div>
 
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem', marginTop: '0.4rem' }}>
@@ -746,15 +1391,20 @@ export default function App() {
                         </span>
                       )}
 
-                      <span style={{
-                        fontSize: '0.6rem', padding: '0.1rem 0.35rem', borderRadius: '4px',
-                        background: doc.status === 'processed' ? 'rgba(16,185,129,0.1)' : doc.status === 'processing' ? 'rgba(245,158,11,0.1)' : 'rgba(239,68,68,0.1)',
-                        color: doc.status === 'processed' ? '#34d399' : doc.status === 'processing' ? '#fbbf24' : '#f87171',
-                        display: 'flex', alignItems: 'center', gap: '0.2rem'
-                      }}>
-                        {doc.status === 'processed' ? <CheckCircle size={8} /> : doc.status === 'processing' ? <Clock size={8} /> : <AlertCircle size={8} />}
-                        {doc.status}
-                      </span>
+                      {(() => {
+                        const badge = getStatusBadgeStyles(doc.status);
+                        return (
+                          <span style={{
+                            fontSize: '0.6rem', padding: '0.1rem 0.35rem', borderRadius: '4px',
+                            background: badge.bg,
+                            color: badge.color,
+                            display: 'flex', alignItems: 'center', gap: '0.2rem'
+                          }}>
+                            {badge.icon}
+                            {badge.label}
+                          </span>
+                        );
+                      })()}
                     </div>
 
                     {doc.summary && (
@@ -796,9 +1446,6 @@ export default function App() {
             <button
               onClick={() => {
                 setIsSettingsOpen(true);
-                if (settingsTab === 'models') {
-                  fetchModels();
-                }
               }}
               style={{
                 background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer',
@@ -873,7 +1520,7 @@ export default function App() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid var(--panel-border)', paddingBottom: '0.75rem' }}>
                   <div>
                     <h2 style={{ fontSize: '1.25rem', fontWeight: '800', color: 'var(--text-primary)', marginBottom: '0.25rem' }}>
-                      {selectedDocDetails.suggested_title || selectedDocDetails.filename}
+                      {selectedDocDetails.filename}
                     </h2>
                     <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                       <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
@@ -912,25 +1559,6 @@ export default function App() {
                       <Sparkles size={14} />
                       <span>AI Synthesized Summary</span>
                     </h3>
-                    {isMissingSummary(selectedDocDetails.summary) && (
-                      <button
-                        onClick={handleSummarizeDocument}
-                        disabled={isSummarizingDoc || selectedDocDetails.status !== 'processed'}
-                        className="btn-secondary"
-                        style={{
-                          padding: '0.45rem 0.8rem',
-                          fontSize: '0.75rem',
-                          borderRadius: '8px',
-                          border: '1px solid rgba(124,58,237,0.25)',
-                          background: isSummarizingDoc ? 'var(--surface-muted)' : 'rgba(124,58,237,0.12)',
-                          color: isSummarizingDoc ? 'var(--text-muted)' : '#a78bfa',
-                          cursor: isSummarizingDoc || selectedDocDetails.status !== 'processed' ? 'not-allowed' : 'pointer',
-                          fontWeight: '700'
-                        }}
-                      >
-                        {isSummarizingDoc ? 'Summarizing...' : 'Summarize'}
-                      </button>
-                    )}
                   </div>
                   <p style={{ fontSize: '0.85rem', color: 'var(--text-primary)', lineHeight: '1.45' }}>
                     {getSummaryText(selectedDocDetails)}
@@ -1072,7 +1700,7 @@ export default function App() {
                             {res.category || 'General'}
                           </span>
                           <span style={{ fontSize: '0.85rem', fontWeight: '700', color: 'var(--text-primary)' }}>
-                            {res.suggested_title || res.filename}
+                            {res.filename}
                           </span>
                         </div>
 
@@ -1171,7 +1799,7 @@ export default function App() {
                         color: 'var(--text-secondary)', cursor: 'help', display: 'inline-flex', alignItems: 'center', gap: '0.25rem'
                       }}>
                         <Link2 size={8} />
-                        {src.suggested_title || src.filename}
+                        {src.filename}
                       </span>
 
                       {/* Floating hover popover */}
@@ -1302,14 +1930,11 @@ export default function App() {
                 General Settings
               </button>
               <button
-                onClick={() => {
-                  setSettingsTab('models');
-                  fetchModels();
-                }}
+                onClick={() => setSettingsTab('account')}
                 style={{
-                  background: settingsTab === 'models' ? 'rgba(124, 58, 237, 0.12)' : 'none',
+                  background: settingsTab === 'account' ? 'rgba(124, 58, 237, 0.12)' : 'none',
                   border: 'none',
-                  color: settingsTab === 'models' ? '#a78bfa' : 'var(--text-secondary)',
+                  color: settingsTab === 'account' ? '#a78bfa' : 'var(--text-secondary)',
                   cursor: 'pointer',
                   padding: '0.5rem 1.25rem',
                   borderRadius: '8px',
@@ -1318,13 +1943,13 @@ export default function App() {
                   transition: 'var(--transition-fast)'
                 }}
               >
-                AI Model Manager
+                Developer Account
               </button>
             </div>
 
             {/* Content Tab conditional views */}
             <div style={{ flex: '1', overflowY: 'auto', maxHeight: '420px', paddingRight: '0.25rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-              {settingsTab === 'general' ? (
+              {settingsTab === 'general' && (
                 <>
                   {/* Theme Switcher section */}
                   <div>
@@ -1407,170 +2032,61 @@ export default function App() {
                         <span style={{ fontWeight: '600', color: '#10b981' }}>Local Connected OS</span>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <span style={{ color: 'var(--text-muted)' }}>Active AI LLM Model</span>
-                        <span style={{ fontWeight: '600', color: 'var(--text-primary)' }}>{activeModel}</span>
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <span style={{ color: 'var(--text-muted)' }}>OCR Engine</span>
-                        <span style={{ fontWeight: '600', color: 'var(--text-primary)' }}>EasyOCR Native (Python)</span>
+                        <span style={{ color: 'var(--text-muted)' }}>Embedding Engine</span>
+                        <span style={{ fontWeight: '600', color: 'var(--text-primary)' }}>BGE-M3 local</span>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                         <span style={{ color: 'var(--text-muted)' }}>Vector Database</span>
-                        <span style={{ fontWeight: '600', color: 'var(--text-primary)' }}>PostgreSQL + pgvector (768d)</span>
+                        <span style={{ fontWeight: '600', color: 'var(--text-primary)' }}>LanceDB local (1024d)</span>
                       </div>
                     </div>
                   </div>
                 </>
-              ) : (
-                /* AI Model Manager Tab */
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              )}
+
+              {settingsTab === 'account' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
                   <div>
-                    <h3 style={{ fontSize: '0.9rem', fontWeight: '700', color: 'var(--text-secondary)', marginBottom: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                      Manage Local AI Models
+                    <h3 style={{ fontSize: '0.9rem', fontWeight: '700', color: 'var(--text-secondary)', marginBottom: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                      User Credentials
                     </h3>
-                    <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: '1.3' }}>
-                      RecallOS runs fully private inference inside Ollama. Choose, download, or remove your model weights below.
-                    </p>
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    {modelsList.map((model) => {
-                      const isActive = activeModel === model.name;
-                      const isInstalled = model.installed;
-                      const isDownloading = downloadingModel === model.name;
-
-                      return (
-                        <div
-                          key={model.name}
-                          className="glass-panel"
-                          style={{
-                            padding: '1.25rem',
-                            border: isActive ? '2px solid #7c3aed' : '1px solid var(--panel-border)',
-                            background: isActive ? 'rgba(124, 58, 237, 0.04)' : 'var(--surface-subtle)',
-                            boxShadow: isActive ? '0 0 20px rgba(124, 58, 237, 0.15)' : 'none',
-                            borderRadius: '12px',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: '0.75rem',
-                            position: 'relative',
-                            transition: 'all 0.3s ease'
-                          }}
-                        >
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                            <div style={{ minWidth: '0', flex: '1', paddingRight: '0.5rem' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                <span style={{ fontSize: '1rem', fontWeight: '800', color: 'var(--text-primary)' }}>
-                                  {model.name}
-                                </span>
-                                {model.is_default && (
-                                  <span style={{ fontSize: '0.6rem', padding: '0.15rem 0.4rem', borderRadius: '4px', background: 'rgba(124,58,237,0.15)', color: '#a78bfa', fontWeight: '700' }}>
-                                    DEFAULT
-                                  </span>
-                                )}
-                              </div>
-                              <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '0.25rem', lineHeight: '1.3' }}>
-                                {model.description}
-                              </p>
-                            </div>
-
-                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.35rem', flexShrink: 0 }}>
-                              <span style={{ fontSize: '0.75rem', fontWeight: '700', padding: '0.2rem 0.5rem', borderRadius: '6px', background: 'var(--chip-bg)', color: 'var(--text-secondary)', border: '1px solid var(--chip-border)' }}>
-                                {model.size}
-                              </span>
-                              {isInstalled && (
-                                <span style={{ fontSize: '0.65rem', padding: '0.15rem 0.4rem', borderRadius: '4px', background: 'rgba(16,185,129,0.12)', color: '#34d399', fontWeight: '700' }}>
-                                  INSTALLED
-                                </span>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Downloading Progress Bar */}
-                          {isDownloading && (
-                            <div style={{ marginTop: '0.25rem' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
-                                <span style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                                  <div className="animate-spin" style={{ width: '10px', height: '10px', border: '2px solid #a78bfa', borderTopColor: 'transparent', borderRadius: '50%' }} />
-                                  Pulling model layers...
-                                </span>
-                                <span style={{ fontWeight: '700', color: '#a78bfa' }}>{downloadProgress}%</span>
-                              </div>
-                              <div style={{ width: '100%', height: '8px', background: 'var(--surface-muted)', borderRadius: '4px', overflow: 'hidden' }}>
-                                <div
-                                  className="progress-bar-shine"
-                                  style={{
-                                    width: `${downloadProgress}%`,
-                                    height: '100%',
-                                    background: 'linear-gradient(90deg, #7c3aed, #a78bfa)',
-                                    transition: 'width 0.2s ease-out',
-                                    borderRadius: '4px'
-                                  }}
-                                />
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Action Controls */}
-                          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '0.25rem' }}>
-                            {isInstalled ? (
-                              <>
-                                {!isActive ? (
-                                  <button
-                                    onClick={() => handleActivateModel(model.name)}
-                                    className="btn-secondary"
-                                    disabled={downloadingModel !== null}
-                                    style={{ padding: '0.4rem 1rem', fontSize: '0.8rem', borderRadius: '8px', cursor: 'pointer' }}
-                                  >
-                                    Activate
-                                  </button>
-                                ) : (
-                                  <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: '#34d399', fontSize: '0.8rem', fontWeight: '700', padding: '0.4rem 0.75rem' }}>
-                                    <CheckCircle size={14} />
-                                    Active Model
-                                  </span>
-                                )}
-
-                                {!isActive && (
-                                  <button
-                                    onClick={() => handleDeleteModel(model.name)}
-                                    disabled={downloadingModel !== null}
-                                    style={{
-                                      background: 'none',
-                                      border: '1px solid rgba(239, 68, 68, 0.2)',
-                                      color: '#f87171',
-                                      cursor: 'pointer',
-                                      padding: '0.4rem 0.75rem',
-                                      borderRadius: '8px',
-                                      fontSize: '0.8rem',
-                                      transition: 'all 0.2s'
-                                    }}
-                                    onMouseOver={(e) => {
-                                      e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)';
-                                    }}
-                                    onMouseOut={(e) => {
-                                      e.currentTarget.style.background = 'none';
-                                    }}
-                                  >
-                                    Delete
-                                  </button>
-                                )}
-                              </>
-                            ) : (
-                              !isDownloading && (
-                                <button
-                                  onClick={() => handleDownloadModel(model.name)}
-                                  className="btn-primary"
-                                  disabled={downloadingModel !== null}
-                                  style={{ padding: '0.4rem 1.25rem', fontSize: '0.8rem', borderRadius: '8px', cursor: 'pointer' }}
-                                >
-                                  Download & Install
-                                </button>
-                              )
-                            )}
-                          </div>
+                    <div className="glass-panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.75rem', border: '1px solid var(--panel-border)', background: 'var(--surface-subtle)', borderRadius: '12px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                          <div style={{ fontSize: '0.9rem', fontWeight: '700', color: 'var(--text-primary)' }}>Logged in as: admin</div>
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>Dev Mode Bypass Authentication</div>
                         </div>
-                      );
-                    })}
+                        <span style={{ fontSize: '0.65rem', padding: '0.2rem 0.5rem', borderRadius: '4px', background: 'rgba(124, 58, 237, 0.15)', color: '#a78bfa', fontWeight: '700' }}>
+                          DEVELOPER
+                        </span>
+                      </div>
+                      
+                      <div style={{ borderTop: '1px solid var(--panel-border)', paddingTop: '1rem', marginTop: '0.25rem' }}>
+                        <button
+                          onClick={() => {
+                            localStorage.removeItem('user_token');
+                            setIsAuthenticated(false);
+                            setIsSettingsOpen(false);
+                          }}
+                          style={{
+                            width: '100%',
+                            padding: '0.75rem',
+                            background: 'linear-gradient(135deg, #ef4444, #dc2626)',
+                            color: '#ffffff',
+                            border: 'none',
+                            borderRadius: '8px',
+                            fontWeight: '700',
+                            cursor: 'pointer',
+                            transition: 'var(--transition-smooth)',
+                            boxShadow: '0 4px 12px rgba(239, 68, 68, 0.2)'
+                          }}
+                          onMouseOver={(e) => e.target.style.opacity = '0.9'}
+                          onMouseOut={(e) => e.target.style.opacity = '1'}
+                        >
+                          Sign Out of RecallOS
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}
