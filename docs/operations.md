@@ -41,9 +41,11 @@ The Django API is local-only and does not require authentication headers.
 Pull models:
 
 ```bash
-curl http://127.0.0.1:11435/api/pull -d '{"model":"nomic-embed-text"}'
+curl http://127.0.0.1:11435/api/pull -d '{"model":"nomic-embed-text-v2-moe"}'
 curl http://127.0.0.1:11435/api/pull -d '{"model":"qwen2.5:1.5b"}'
+curl http://127.0.0.1:11435/api/pull -d '{"model":"llama3.2:3b"}'
 curl http://127.0.0.1:11435/api/pull -d '{"model":"qwen3.5:4b"}'
+curl http://127.0.0.1:11435/api/pull -d '{"model":"qwen2.5:7b-instruct"}'
 curl http://127.0.0.1:11435/api/pull -d '{"model":"gemma4:e2b"}'
 ```
 
@@ -150,7 +152,7 @@ Symptoms:
 Cause:
 
 - `DocumentChunk.embedding` expects 768 dimensions.
-- Current default embedding model is `nomic-embed-text`.
+- Current default embedding model is `nomic-embed-text-v2-moe`.
 
 Resolution:
 

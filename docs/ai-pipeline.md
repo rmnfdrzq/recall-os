@@ -74,7 +74,7 @@ Chunk size is character-based, not token-based.
 Default embedding model:
 
 ```text
-nomic-embed-text
+nomic-embed-text-v2-moe
 ```
 
 The database expects 768-dimensional vectors.
@@ -129,8 +129,8 @@ similarity = 1 - cosine_distance
 User message
   -> save user ChatMessage
   -> generate query embedding
-  -> retrieve top 4 relevant chunks
-  -> apply similarity threshold > 0.3
+  -> retrieve top 8 relevant chunks
+  -> apply similarity threshold > 0.18
   -> build system prompt with retrieved excerpts
   -> call Ollama completion
   -> save assistant ChatMessage with sources

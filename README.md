@@ -68,12 +68,14 @@ recallos/
 Supported UI catalog models:
 
 - `qwen2.5:1.5b`
+- `llama3.2:3b`
 - `qwen3.5:4b`
+- `qwen2.5:7b-instruct`
 - `gemma4:e2b`
 
 Embedding model default:
 
-- `nomic-embed-text`
+- `nomic-embed-text-v2-moe`
 
 ## Environment Variables
 
@@ -97,7 +99,7 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/0
 
 OLLAMA_BASE_URL=http://127.0.0.1:11435
 OLLAMA_LLM_MODEL=gemma4:e2b
-OLLAMA_EMBED_MODEL=nomic-embed-text
+OLLAMA_EMBED_MODEL=nomic-embed-text-v2-moe
 OCR_ENGINE=easyocr
 ```
 
@@ -148,9 +150,11 @@ Ollama is exposed to the host on port `11435`.
 ### 2. Pull required Ollama models
 
 ```bash
-curl http://127.0.0.1:11435/api/pull -d '{"model":"nomic-embed-text"}'
+curl http://127.0.0.1:11435/api/pull -d '{"model":"nomic-embed-text-v2-moe"}'
 curl http://127.0.0.1:11435/api/pull -d '{"model":"qwen2.5:1.5b"}'
+curl http://127.0.0.1:11435/api/pull -d '{"model":"llama3.2:3b"}'
 curl http://127.0.0.1:11435/api/pull -d '{"model":"qwen3.5:4b"}'
+curl http://127.0.0.1:11435/api/pull -d '{"model":"qwen2.5:7b-instruct"}'
 curl http://127.0.0.1:11435/api/pull -d '{"model":"gemma4:e2b"}'
 ```
 

@@ -36,7 +36,7 @@ class DocumentChunk(models.Model):
     document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name='chunks')
     content = models.TextField()
     chunk_index = models.IntegerField()
-    # pgvector VectorField (e.g. 768 dimensions for nomic-embed-text)
+    # pgvector VectorField (e.g. 768 dimensions for nomic-embed-text-v2-moe)
     # We set dimensions to 768 by default
     embedding = VectorField(dimensions=768, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)

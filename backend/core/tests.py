@@ -235,7 +235,9 @@ class RecallOSTests(APITestCase):
             "models": [
                 {"name": "qwen2.5:1.5b", "size": 986 * 1024 * 1024},
                 {"name": "qwen3.5:4b", "size": int(2.6 * 1024 * 1024 * 1024)},
-                {"name": "gemma4:e2b", "size": int(1.6 * 1024 * 1024 * 1024)},
+                {"name": "llama3.2:3b", "size": int(2.0 * 1024 * 1024 * 1024)},
+                {"name": "qwen2.5:7b-instruct", "size": int(4.4 * 1024 * 1024 * 1024)},
+                {"name": "gemma4:e2b", "size": int(6.7 * 1024 * 1024 * 1024)},
             ]
         }
 
@@ -244,6 +246,5 @@ class RecallOSTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         models = response.data['models']
         names = [model['name'] for model in models]
-        self.assertEqual(names, ['qwen2.5:1.5b', 'qwen3.5:4b', 'gemma4:e2b'])
-        self.assertNotIn('qwen2.5:7b-instruct', names)
+        self.assertEqual(names, ['qwen2.5:1.5b', 'llama3.2:3b', 'qwen3.5:4b', 'qwen2.5:7b-instruct', 'gemma4:e2b'])
         self.assertTrue(all(model['installed'] for model in models))

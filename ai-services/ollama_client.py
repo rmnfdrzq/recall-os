@@ -21,7 +21,7 @@ def _get_llm_model():
     return os.environ.get('OLLAMA_LLM_MODEL', 'qwen2.5:1.5b')
 
 def _get_embed_model():
-    return os.environ.get('OLLAMA_EMBED_MODEL', 'nomic-embed-text')
+    return os.environ.get('OLLAMA_EMBED_MODEL', 'nomic-embed-text-v2-moe')
 
 # Keep module-level names for backward compatibility (imported by views.py)
 OLLAMA_BASE_URL = _get_ollama_url()
@@ -44,7 +44,7 @@ def generate_embedding(text):
             "model": embed_model,
             "input": text if isinstance(text, list) else [text]
         }
-        response = requests.post(url, json=payload, timeout=30)
+        response = requests.post(url, json=payload, timeout=60)
         if response.status_code == 200:
             data = response.json()
             embeddings = data.get('embeddings', [])
@@ -60,7 +60,7 @@ def generate_embedding(text):
             "model": embed_model,
             "prompt": text
         }
-        response = requests.post(url, json=payload, timeout=30)
+        response = requests.post(url, json=payload, timeout=60)
         if response.status_code == 200:
             return response.json().get('embedding', [])
     except Exception as e:
@@ -74,7 +74,7 @@ def get_fallback_model(attempted_model):
     ollama_url = _get_ollama_url()
     try:
         url = f"{ollama_url}/api/tags"
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=15)
         if response.status_code == 200:
             models = response.json().get('models', [])
             names = [m.get('name') for m in models]
@@ -118,13 +118,13 @@ def generate_completion(prompt, system_prompt=None, stream=False, model=None):
         if stream:
             # Returns a generator yielding text blocks
             def stream_generator():
-                response = requests.post(url, json=payload, stream=True, timeout=60)
+                response = requests.post(url, json=payload, stream=True, timeout=300)
                 if response.status_code != 200:
                     fallback = get_fallback_model(selected_model)
                     if fallback and fallback != selected_model:
                         logger.info(f"Ollama model {selected_model} not found for stream, falling back to {fallback}")
                         payload["model"] = fallback
-                        response = requests.post(url, json=payload, stream=True, timeout=60)
+                        response = requests.post(url, json=payload, stream=True, timeout=300)
 
                 if response.status_code == 200:
                     for line in response.iter_lines():
@@ -135,13 +135,13 @@ def generate_completion(prompt, system_prompt=None, stream=False, model=None):
                     yield f"Error calling Ollama model: Status {response.status_code}"
             return stream_generator()
         else:
-            response = requests.post(url, json=payload, timeout=60)
+            response = requests.post(url, json=payload, timeout=300)
             if response.status_code == 404 or (response.status_code != 200 and "not found" in response.text):
                 fallback = get_fallback_model(selected_model)
                 if fallback and fallback != selected_model:
                     logger.info(f"Ollama model {selected_model} not found, falling back to {fallback}")
                     payload["model"] = fallback
-                    response = requests.post(url, json=payload, timeout=60)
+                    response = requests.post(url, json=payload, timeout=300)
 
             if response.status_code == 200:
                 return response.json().get('response', '')

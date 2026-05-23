@@ -51,7 +51,7 @@ Fields:
 | `document` | FK Document | Cascades on document deletion |
 | `content` | TextField | Chunk text |
 | `chunk_index` | Integer | Ordered position in source document |
-| `embedding` | VectorField(768) | Matches `nomic-embed-text` dimensions |
+| `embedding` | VectorField(768) | Matches `nomic-embed-text-v2-moe` dimensions |
 | `created_at` | DateTime | Auto-created |
 
 Ordering:

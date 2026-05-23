@@ -19,12 +19,13 @@ const API_BASE = `${BACKEND_HOST}/api`;
 
 const DEFAULT_MODELS = [
   { name: 'qwen2.5:1.5b', size: '986 MB', description: 'Default lightweight LLM — fast & memory-efficient.', installed: true, is_default: true },
-  { name: 'qwen3.5:4b', size: '2.6 GB', description: 'Balanced medium-sized model for complex reasoning.', installed: true, is_default: false },
-  { name: 'gemma4:e2b', size: '1.6 GB', description: "Google's Gemma E2B optimized variant.", installed: true, is_default: false }
+  { name: 'llama3.2:3b', size: '2.0 GB', description: 'Meta Llama 3.2 lightweight multilingual model.', installed: false, is_default: false },
+  { name: 'qwen3.5:4b', size: '2.6 GB', description: 'Balanced medium-sized model for complex reasoning.', installed: false, is_default: false },
+  { name: 'qwen2.5:7b-instruct', size: '4.4 GB', description: 'Premium 7B model — exceptional reasoning and Russian language support.', installed: false, is_default: false },
+  { name: 'gemma4:e2b', size: '6.7 GB', description: "Google's Gemma E2B optimized variant.", installed: true, is_default: false }
 ];
 
 const normalizeModelName = (modelName) => {
-  if (modelName === 'qwen2.5:7b-instruct') return 'qwen3.5:4b';
   return DEFAULT_MODELS.some(model => model.name === modelName) ? modelName : 'qwen2.5:1.5b';
 };
 

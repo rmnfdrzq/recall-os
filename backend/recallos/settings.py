@@ -114,5 +114,5 @@ CELERY_TIMEZONE = 'UTC'
 # AI / OCR Custom System Configs
 OLLAMA_BASE_URL = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11435')
 OLLAMA_LLM_MODEL = os.environ.get('OLLAMA_LLM_MODEL', 'gemma4:e2b')
-OLLAMA_EMBED_MODEL = os.environ.get('OLLAMA_EMBED_MODEL', 'nomic-embed-text')
+OLLAMA_EMBED_MODEL = os.environ.get('OLLAMA_EMBED_MODEL', 'nomic-embed-text-v2-moe')
 OCR_ENGINE = os.environ.get('OCR_ENGINE', 'easyocr')

@@ -23,14 +23,26 @@ SUPPORTED_OLLAMA_MODELS = [
         "is_default": True,
     },
     {
+        "name": "llama3.2:3b",
+        "fallback_size": "2.0 GB",
+        "description": "Meta Llama 3.2 lightweight multilingual model.",
+        "is_default": False,
+    },
+    {
         "name": "qwen3.5:4b",
         "fallback_size": "2.6 GB",
         "description": "Balanced medium-sized model for complex reasoning.",
         "is_default": False,
     },
     {
+        "name": "qwen2.5:7b-instruct",
+        "fallback_size": "4.4 GB",
+        "description": "Premium 7B model — exceptional reasoning and Russian language support.",
+        "is_default": False,
+    },
+    {
         "name": "gemma4:e2b",
-        "fallback_size": "1.6 GB",
+        "fallback_size": "6.7 GB",
         "description": "Google's Gemma E2B optimized variant.",
         "is_default": False,
     },
@@ -232,15 +244,15 @@ class ChatMessageCreateView(APIView):
         sources = []
 
         if query_vector:
-            # Query top 4 most similar chunks from processed local documents.
+            # Query top 8 most similar chunks from processed local documents.
             chunks = DocumentChunk.objects.filter(
                 document__status='processed'
             ).annotate(
                 distance=CosineDistance('embedding', query_vector)
-            ).order_by('distance')[:4]
+            ).order_by('distance')[:8]
 
             for chunk in chunks:
-                if chunk.distance is not None and (1 - chunk.distance) > 0.3: # similarity threshold
+                if chunk.distance is not None and (1 - chunk.distance) > 0.18: # similarity threshold
                     context_chunks.append(chunk)
                     sources.append({
                         "document_id": str(chunk.document.id),
