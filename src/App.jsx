@@ -7,11 +7,12 @@ import {
 import { GlimmerSkeleton } from './components/LazyLoader';
 
 const getBackendHost = () => {
-  const hostname = window.location.hostname;
-  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+  // During local development, route to local Django
+  if (import.meta.env.DEV) {
     return 'http://127.0.0.1:8000';
   }
-  return `${window.location.protocol}//${hostname}:8000`;
+  // In production SaaS mode, route to centralized cloud API
+  return 'https://api.recallos.com';
 };
 
 const BACKEND_HOST = getBackendHost();
@@ -103,7 +104,7 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
 
   // Settings & Theme States
-  const [theme, setTheme] = useState(localStorage.getItem('theme') || 'dark');
+  const [theme, setTheme] = useState(localStorage.getItem('theme') || 'light');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState('general'); // 'general' or 'models'
   const [activeModel, setActiveModel] = useState(normalizeModelName(localStorage.getItem('activeModel') || 'qwen2.5:1.5b'));
@@ -134,6 +135,11 @@ export default function App() {
   useEffect(() => {
     localStorage.removeItem('token');
     localStorage.removeItem('username');
+
+    // Force WebKit viewport repaint to avoid black/blank screen on startup
+    setTimeout(() => {
+      window.dispatchEvent(new Event('resize'));
+    }, 100);
   }, []);
 
   // Sync active model with localStorage
