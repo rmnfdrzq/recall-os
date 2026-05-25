@@ -1,6 +1,6 @@
 # RecallOS Server
 
-RecallOS Server is the Django/Ollama backend used by the RecallOS desktop client. It persists chat state, calls host Ollama for generation and embeddings, and provides stateless fallback document processing.
+RecallOS Server is the Django/Groq backend used by the RecallOS desktop client. It persists chat state, calls Groq for AI generation, and provides stateless fallback document processing.
 
 The server is not the source of truth for the user's document library. In the active architecture, document metadata, chunks, vectors, and search indexes live in the Tauri client.
 
@@ -13,10 +13,10 @@ The server currently provides:
 - assistant message source persistence in Postgres;
 - final prompt construction from user message plus client-supplied `context_chunks`;
 - per-response source-ref assignment and source filtering based on refs cited by the LLM;
-- LLM generation through host Ollama;
+- LLM generation through Groq;
 - stateless document fallback processing;
 - stateless document summary generation;
-- stateless embedding generation through host Ollama.
+- stateless embedding generation through local Ollama `bge-m3`.
 
 ## Non-Responsibilities
 
@@ -38,12 +38,9 @@ The backend uses:
 - Django;
 - Django REST Framework;
 - PostgreSQL via `psycopg2-binary`;
-- `requests` for Ollama calls;
-- `PyPDF2` for PDF fallback extraction;
+- `requests` for Groq API calls;
+- `PyPDF2` and `PyMuPDF` for PDF extraction/rendering;
 - Pillow;
-- optional EasyOCR support in `ai-services/ocr_service.py`.
-
-`easyocr` is referenced by the OCR service but is not listed in `backend/requirements.txt`. If it is not installed, OCR falls back to descriptive placeholder text.
 
 ## Docker Runtime
 
@@ -52,22 +49,17 @@ The backend uses:
 - `web`: the Django API on port `8000`;
 - `db`: PostgreSQL 16 on port `5432`.
 
-Ollama is expected to be installed on the host machine. The Docker web service points to host Ollama through:
+Groq is configured through `.env`:
 
 ```text
-OLLAMA_BASE_URL=http://host.docker.internal:11434
+GROQ_API_KEY=...
 ```
 
-The default LLM model is configured as:
+Model routing is fixed and explicit:
 
 ```text
-OLLAMA_LLM_MODEL=gemma4:e2b
-```
-
-The embeddings endpoint defaults to model name:
-
-```text
-bge-m3
+GROQ_TEXT_MODEL=llama-3.1-8b-instant
+GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
 ```
 
 ## Active Endpoints
@@ -80,8 +72,6 @@ GET/POST /api/chat/session/
 GET      /api/chat/session/<id>/
 POST     /api/chat/session/<id>/message/
 GET      /api/models/
-GET      /api/models/pull/?model=<name>
-POST     /api/models/delete/
 ```
 
 There are no persistent `/api/documents/` CRUD routes and no `/api/search/semantic/` route in the active API.
@@ -111,10 +101,11 @@ Supported fallback extraction currently includes:
 - Markdown;
 - common code/config formats;
 - CSV/HTML/CSS;
-- digital PDFs through `PyPDF2`;
-- images through optional EasyOCR.
+- text and metadata from digital PDFs through `PyPDF2`;
+- rendered PDF pages through the Groq vision model when possible;
+- images/screenshots/scans through the Groq vision model.
 
-For digital PDFs, the server inserts `[Page N]` markers before page text. For scanned PDFs without extractable text, the server returns a scanned-PDF message rather than performing full PDF OCR.
+Text files, Markdown, code, normal chat, RAG chunks, summaries, metadata, and categories use `llama-3.1-8b-instant`. Images, screenshots, scans, and PDFs use `meta-llama/llama-4-scout-17b-16e-instruct`.
 
 Temporary upload files are deleted after processing.
 
@@ -129,7 +120,7 @@ Temporary upload files are deleted after processing.
 }
 ```
 
-It calls the configured Ollama LLM through `generate_document_summary` and returns:
+It calls Groq through `generate_document_summary` and returns:
 
 ```json
 {
@@ -146,7 +137,7 @@ The endpoint persists nothing.
 ```json
 {
   "texts": ["first chunk", "second chunk"],
-  "model": "bge-m3"
+  "model": "ignored"
 }
 ```
 
@@ -158,11 +149,11 @@ It returns:
 }
 ```
 
-The implementation calls host Ollama:
+The implementation calls local Ollama with `bge-m3`:
 
 1. First, `/api/embed` for batch embedding.
 2. If needed, `/api/embeddings` one text at a time.
-3. If Ollama embedding calls fail, it currently returns zero vectors sized to 1024 dimensions.
+3. If Ollama embedding calls fail, it returns zero vectors sized to 1024 dimensions to preserve the indexing contract.
 
 The endpoint persists no vectors or user text.
 
@@ -196,7 +187,7 @@ The server:
 2. Converts up to 24 client context chunks into prompt context.
 3. Assigns temporary source refs such as `[S1]`, `[S2]`, and stores a source map for the current response only.
 4. Builds a system prompt that asks the LLM to cite only source refs that directly support the answer.
-5. Calls Ollama through `generate_completion`.
+5. Calls Groq text model through `generate_completion`.
 6. Extracts cited source refs from the generated answer.
 7. Strips source-ref markers from the visible assistant text.
 8. Saves the assistant message with a `sources` array filtered to cited refs only.
@@ -238,28 +229,21 @@ The active Django models are:
 
 `ChatMessage.sources` stores source metadata filtered from client-supplied context chunks based on the source refs cited by the model in that specific answer.
 
-## Model Management Endpoints
-
-The model endpoints are still present:
+## Model Endpoint
 
 - `GET /api/models/`
-- `GET /api/models/pull/?model=<name>`
-- `POST /api/models/delete/`
 
-They are currently limited to the server's `SUPPORTED_OLLAMA_MODELS` list, which contains `gemma4:e2b`.
-
-The current client UI does not expose full model download controls.
+It returns the configured Groq text and vision model profiles. There is no local model pull/delete flow.
 
 ## Current Limitations
 
 - No server-side document database or vector index.
 - No server-side semantic search.
 - No persistent upload storage.
-- OCR requires optional EasyOCR installation; otherwise it returns fallback text.
-- Scanned PDFs are not fully OCR-processed by the PDF path.
-- Embedding failures currently degrade to zero vectors instead of failing the request.
+- PDF rendering requires `PyMuPDF`; if rendering fails, digital text extraction is used as fallback.
+- Embeddings require local Ollama with `bge-m3`; failures degrade to zero vectors instead of failing the request.
 - Authentication is not enforced; endpoints use `AllowAny`.
-- Cloud API key environment variables exist in Docker config but are not part of the active RAG path.
+- `GROQ_API_KEY` must be set for AI chat, summary, metadata, category, and vision extraction.
 
 ## Verification
 

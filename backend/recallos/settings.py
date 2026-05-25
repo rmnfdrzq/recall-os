@@ -86,8 +86,16 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # CORS Configurations
-CORS_ALLOW_ALL_ORIGINS = True  # In production, specify allowed origins
-CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False').lower() == 'true'
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        'CORS_ALLOWED_ORIGINS',
+        'http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174'
+    ).split(',')
+    if origin.strip()
+]
+CORS_ALLOW_CREDENTIALS = False
 
 # Django REST Framework Configuration
 REST_FRAMEWORK = {
@@ -99,7 +107,10 @@ REST_FRAMEWORK = {
     'UNAUTHENTICATED_TOKEN': None,
 }
 
-# AI / OCR Custom System Configs
-OLLAMA_BASE_URL = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11435')
-OLLAMA_LLM_MODEL = os.environ.get('OLLAMA_LLM_MODEL', 'gemma4:e2b')
+# AI Custom System Configs
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
+GROQ_TEXT_MODEL = os.environ.get('GROQ_TEXT_MODEL', 'llama-3.1-8b-instant')
+GROQ_VISION_MODEL = os.environ.get('GROQ_VISION_MODEL', 'meta-llama/llama-4-scout-17b-16e-instruct')
+OLLAMA_BASE_URL = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
+OLLAMA_EMBEDDING_MODEL = os.environ.get('OLLAMA_EMBEDDING_MODEL', 'bge-m3')
 OCR_ENGINE = os.environ.get('OCR_ENGINE', 'easyocr')

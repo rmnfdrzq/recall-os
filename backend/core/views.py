@@ -2,10 +2,8 @@ import os
 import sys
 import logging
 import json
+import re
 import tempfile
-import requests
-from django.http import StreamingHttpResponse
-from django.conf import settings
 from PyPDF2 import PdfReader
 from rest_framework import viewsets, status
 from rest_framework.views import APIView
@@ -15,23 +13,58 @@ from django.shortcuts import get_object_or_404
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_OLLAMA_MODELS = [
+SUPPORTED_GROQ_MODELS = [
     {
-        "name": "gemma4:e2b",
-        "fallback_size": "6.7 GB",
-        "description": "Google's Gemma E2B optimized variant.",
+        "name": "llama-3.1-8b-instant",
+        "profile": "text",
+        "description": "Default Groq text model for chat, RAG chunks, summaries, metadata, and categories.",
         "is_default": True,
+    },
+    {
+        "name": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "profile": "vision",
+        "description": "Groq vision model for images, scans, screenshots, and PDF processing.",
+        "is_default": False,
     },
 ]
 
-SUPPORTED_OLLAMA_MODEL_NAMES = [model["name"] for model in SUPPORTED_OLLAMA_MODELS]
+SUPPORTED_GROQ_MODEL_NAMES = [model["name"] for model in SUPPORTED_GROQ_MODELS]
+
+SOURCE_REF_PATTERN = re.compile(r'\[S(\d+)\]')
 
 
-def get_ollama_base_url():
-    return os.environ.get(
-        'OLLAMA_BASE_URL',
-        getattr(settings, 'OLLAMA_BASE_URL', 'http://ollama:11434')
-    ).rstrip('/')
+def extract_cited_source_refs(answer_text):
+    seen = set()
+    refs = []
+    for match in SOURCE_REF_PATTERN.finditer(answer_text or ''):
+        ref = f"S{match.group(1)}"
+        if ref not in seen:
+            seen.add(ref)
+            refs.append(ref)
+    return refs
+
+
+def strip_source_ref_markers(answer_text):
+    cleaned = SOURCE_REF_PATTERN.sub('', answer_text or '')
+    cleaned = re.sub(r'[ \t]+([.,;:!?])', r'\1', cleaned)
+    cleaned = re.sub(r' {2,}', ' ', cleaned)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned.strip()
+
+
+def filter_sources_by_cited_refs(sources_by_ref, cited_refs):
+    filtered_sources = []
+    seen_documents = set()
+    for ref in cited_refs:
+        source = sources_by_ref.get(ref)
+        if not source:
+            continue
+        document_key = source.get('document_id') or source.get('filename') or ref
+        if document_key in seen_documents:
+            continue
+        seen_documents.add(document_key)
+        filtered_sources.append(source)
+    return filtered_sources
 
 # Import path patches to load ai-services modules
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -39,13 +72,16 @@ WORKSPACE_ROOT = os.path.dirname(BASE_DIR)
 sys.path.append(os.path.join(WORKSPACE_ROOT, 'ai-services'))
 
 from chunker import semantic_chunk_text
-from ocr_service import extract_text_from_image
-from ollama_client import (
+from groq_client import (
+    VISION_MODEL_PROFILE,
+    bytes_to_data_url,
+    extract_text_from_images,
     generate_completion,
     extract_metadata,
+    generate_document_category,
     generate_document_summary,
-    generate_embeddings,
 )
+from ollama_client import OLLAMA_EMBEDDING_MODEL, generate_embeddings
 from .models import ChatSession, ChatMessage
 from .serializers import (
     ChatSessionSerializer,
@@ -65,42 +101,71 @@ def infer_file_type(filename):
     return 'text'
 
 
-def extract_uploaded_file_text(uploaded_file, filename):
-    ext = os.path.splitext(filename)[1].lower()
-
-    if ext in ['.txt', '.md', '.markdown', '.py', '.js', '.ts', '.jsx', '.tsx', '.json', '.csv', '.html', '.css', '.rs', '.go', '.yaml', '.yml']:
-        return uploaded_file.read().decode('utf-8', errors='ignore')
-
-    suffix = ext or '.upload'
-    temp_path = None
+def render_pdf_pages_to_data_urls(pdf_bytes, max_pages=3):
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            for chunk in uploaded_file.chunks():
-                tmp.write(chunk)
-            temp_path = tmp.name
+        import fitz
+    except Exception as exc:
+        logger.warning("PyMuPDF is unavailable; PDF vision rendering is disabled: %s", exc)
+        return []
 
-        if ext == '.pdf':
+    data_urls = []
+    try:
+        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for page_index in range(min(len(document), max_pages)):
+            page = document.load_page(page_index)
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), alpha=False)
+            data_urls.append(bytes_to_data_url(pixmap.tobytes("png"), filename=f"page-{page_index + 1}.png", mime_type="image/png"))
+        document.close()
+    except Exception as exc:
+        logger.warning("PDF page rendering for Groq vision failed: %s", exc)
+    return data_urls
+
+
+def extract_text_from_pdf_bytes(pdf_bytes):
+    pages_text = []
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_bytes)
+            temp_path = tmp.name
+        try:
             reader = PdfReader(temp_path)
-            pages_text = []
             for page_index, page in enumerate(reader.pages, start=1):
                 page_content = page.extract_text()
                 if page_content:
                     pages_text.append(f"[Page {page_index}]\n\n{page_content}")
-            extracted_text = "\n\n".join(pages_text)
-            if extracted_text.strip():
-                return extracted_text
-            return "[Scanned PDF] No digital characters found. OCR or LLM vision extraction is required."
+        finally:
+            os.unlink(temp_path)
+    except Exception as exc:
+        logger.warning("Digital PDF text extraction failed: %s", exc)
 
-        if ext in ['.png', '.jpg', '.jpeg', '.webp']:
-            return f"[Page 1]\n\n{extract_text_from_image(temp_path)}"
+    return "\n\n".join(pages_text).strip()
 
-        return uploaded_file.read().decode('utf-8', errors='ignore')
-    finally:
-        if temp_path:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                logger.warning("Failed to delete temporary upload file: %s", temp_path)
+
+def extract_uploaded_file_text(uploaded_file, filename):
+    ext = os.path.splitext(filename)[1].lower()
+
+    if ext in ['.txt', '.md', '.markdown', '.py', '.js', '.ts', '.jsx', '.tsx', '.json', '.csv', '.html', '.css', '.rs', '.go', '.yaml', '.yml']:
+        return uploaded_file.read().decode('utf-8', errors='ignore'), "text"
+
+    file_bytes = uploaded_file.read()
+
+    if ext in ['.png', '.jpg', '.jpeg', '.webp']:
+        data_url = bytes_to_data_url(file_bytes, filename=filename)
+        return f"[Page 1]\n\n{extract_text_from_images([data_url], filename=filename)}", VISION_MODEL_PROFILE
+
+    if ext == '.pdf':
+        rendered_pages = render_pdf_pages_to_data_urls(file_bytes)
+        if rendered_pages:
+            vision_text = extract_text_from_images(rendered_pages, filename=filename).strip()
+            if vision_text:
+                return vision_text, VISION_MODEL_PROFILE
+
+        extracted_text = extract_text_from_pdf_bytes(file_bytes)
+        if extracted_text:
+            return extracted_text, VISION_MODEL_PROFILE
+        return "[PDF] No readable content could be extracted from this PDF.", VISION_MODEL_PROFILE
+
+    return file_bytes.decode('utf-8', errors='ignore'), "text"
 
 
 class StatelessDocumentProcessView(APIView):
@@ -119,12 +184,13 @@ class StatelessDocumentProcessView(APIView):
         file_type = infer_file_type(filename)
 
         try:
-            extracted_text = extract_uploaded_file_text(uploaded_file, filename).strip()
+            extracted_text, model_profile = extract_uploaded_file_text(uploaded_file, filename)
+            extracted_text = extracted_text.strip()
             if not extracted_text:
                 return Response({"error": "No text could be extracted from the file"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
             chunks = semantic_chunk_text(extracted_text, chunk_size=1000, overlap=200)
-            metadata = extract_metadata(extracted_text, fallback_title=filename)
+            metadata = extract_metadata(extracted_text, fallback_title=filename, model_profile=model_profile)
 
             return Response({
                 "filename": filename,
@@ -151,17 +217,54 @@ class StatelessDocumentSummaryView(APIView):
     def post(self, request):
         text = str(request.data.get('text') or '').strip()
         filename = str(request.data.get('filename') or '').strip() or None
+        model_profile = str(request.data.get('model_profile') or request.data.get('modelProfile') or 'text').strip()
 
         if not text:
             return Response({"error": "Document text is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            summary = generate_document_summary(text, fallback_title=filename)
+            summary = generate_document_summary(text, fallback_title=filename, model_profile=model_profile)
             if not summary:
                 return Response({"error": "AI summary could not be generated"}, status=status.HTTP_502_BAD_GATEWAY)
             return Response({"summary": summary}, status=status.HTTP_200_OK)
         except Exception as e:
             logger.exception("Transient document summary generation failed for %s: %s", filename or "untitled", e)
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class StatelessDocumentCategoryView(APIView):
+    """
+    Transient category generation for client-first ingestion.
+    Receives already extracted chunks plus an AI summary, returns a library label, and persists nothing.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        filename = str(request.data.get('filename') or '').strip() or None
+        summary = str(request.data.get('summary') or '').strip()
+        chunks = request.data.get('chunks') or []
+        model_profile = str(request.data.get('model_profile') or request.data.get('modelProfile') or 'text').strip()
+
+        chunk_texts = []
+        if isinstance(chunks, list):
+            for item in chunks[:24]:
+                if isinstance(item, str):
+                    content = item
+                else:
+                    content = str(item.get('content') or item.get('text') or '')
+                content = content.strip()
+                if content:
+                    chunk_texts.append(content)
+
+        text = "\n\n".join(chunk_texts)
+        if not text and not summary:
+            return Response({"error": "Summary or chunks are required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            category = generate_document_category(text, summary=summary, fallback_title=filename, model_profile=model_profile)
+            return Response({"category": category or "General"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception("Transient document category generation failed for %s: %s", filename or "untitled", e)
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -186,7 +289,7 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
 class ChatMessageCreateView(APIView):
     """
     Contextual RAG Chat View.
-    Retrieves semantic excerpts, constructs LLM prompt, queries local Ollama, and saves dialog logs.
+    Retrieves semantic excerpts, constructs LLM prompt, queries Groq text model, and saves dialog logs.
     """
     permission_classes = [AllowAny]
 
@@ -206,7 +309,7 @@ class ChatMessageCreateView(APIView):
 
         # 2. Retrieve Semantic Excerpts (RAG Context)
         context_chunks = []
-        sources = []
+        sources_by_ref = {}
 
         client_context = request.data.get('context_chunks') or []
         if client_context:
@@ -215,7 +318,9 @@ class ChatMessageCreateView(APIView):
                 if not chunk_content:
                     continue
                 source_title = item.get('suggested_title') or item.get('filename') or 'Local document'
+                source_ref = f"S{len(context_chunks) + 1}"
                 context_chunks.append({
+                    "source_ref": source_ref,
                     "title": source_title,
                     "chunk_index": item.get('chunk_index', idx),
                     "page_number": item.get('page_number'),
@@ -225,7 +330,8 @@ class ChatMessageCreateView(APIView):
                     "entities": item.get('entities') or {},
                     "content": chunk_content,
                 })
-                sources.append({
+                sources_by_ref[source_ref] = {
+                    "source_ref": source_ref,
                     "document_id": str(item.get('document_id') or ''),
                     "filename": item.get('filename') or source_title,
                     "suggested_title": source_title,
@@ -233,13 +339,14 @@ class ChatMessageCreateView(APIView):
                     "page_number": item.get('page_number'),
                     "section_title": item.get('section_title') or "Document",
                     "snippet": chunk_content[:150] + ("..." if len(chunk_content) > 150 else ""),
-                })
+                }
 
         # 3. Construct contextual prompt
         context_str = ""
         if context_chunks:
             if client_context:
                 context_str = "\n".join([
+                    f"Source Ref: [{c['source_ref']}]\n"
                     f"Source Document: {c['title']} "
                     f"(Section: {c['section_title']}; Page: {c.get('page_number') or 'unknown'}; "
                     f"Chunk: {c['chunk_index']}; Type: {c['content_type']}; Reason: {c['reason']})\n"
@@ -253,23 +360,24 @@ class ChatMessageCreateView(APIView):
             "You are RecallOS AI, a personal knowledge workspace assistant.\n"
             "Use the retrieved personal document excerpts, their sections, pages, and detected entities to answer accurately.\n"
             "For list-style questions, consolidate facts across all supplied excerpts instead of answering from the first excerpt only.\n"
-            "When the answer depends on documents, cite source document names and sections/pages when available.\n"
+            "When the answer depends on documents, cite only the source refs that directly support the answer, using markers like [S1].\n"
+            "Do not cite unused source refs. If a source was retrieved but did not support the answer, do not cite it.\n"
             "If the context is empty or does not contain enough info, clearly state that the local documents do not contain enough information before using general knowledge.\n"
             "Keep your formatting clean, structured in markdown, and highly readable.\n\n"
             f"Retrieved Context:\n{context_str}"
         )
 
-        # Extract active model
-        active_model = request.data.get('model') or getattr(settings, 'OLLAMA_LLM_MODEL', 'gemma4:e2b')
-
         # 4. Generate LLM completion
-        ai_response = generate_completion(content, system_prompt=system_prompt, stream=False, model=active_model)
+        ai_response = generate_completion(content, system_prompt=system_prompt, stream=False, model_profile="text")
+        cited_refs = extract_cited_source_refs(ai_response)
+        sources = filter_sources_by_cited_refs(sources_by_ref, cited_refs)
+        clean_ai_response = strip_source_ref_markers(ai_response)
 
         # 5. Save assistant response message with sourced documents list
         assistant_message = ChatMessage.objects.create(
             session=session,
             role='assistant',
-            content=ai_response,
+            content=clean_ai_response,
             sources=sources
         )
 
@@ -281,126 +389,30 @@ class ChatMessageCreateView(APIView):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
-class OllamaModelListView(APIView):
+class GroqModelListView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        ollama_url = get_ollama_base_url()
-
-        # Fetch real installed models from Docker Ollama
-        installed_models = {}
-        ollama_available = False
-        try:
-            url = f"{ollama_url}/api/tags"
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                ollama_available = True
-                models_data = response.json().get('models', [])
-                for m in models_data:
-                    name = m.get('name', '')
-                    installed_models[name] = m
-                    # Index without :latest suffix for convenience
-                    if name.endswith(':latest'):
-                        installed_models[name[:-7]] = m
-        except Exception as e:
-            logger.error(f"Failed to fetch tags from Docker Ollama ({ollama_url}): {e}")
-
-        def format_size(byte_count):
-            """Convert bytes to human-readable size string."""
-            if byte_count <= 0:
-                return "Unknown"
-            gb = byte_count / (1024 ** 3)
-            if gb >= 1.0:
-                return f"{gb:.1f} GB"
-            mb = byte_count / (1024 ** 2)
-            return f"{mb:.0f} MB"
-
-        models_list = []
-        for model in SUPPORTED_OLLAMA_MODELS:
-            name = model["name"]
-            ollama_data = installed_models.get(name)
-            is_installed = ollama_data is not None
-
-            if is_installed:
-                byte_count = ollama_data.get('size', 0)
-                size_str = format_size(byte_count) if byte_count > 0 else model["fallback_size"]
-            else:
-                # Show fallback size estimate when not installed
-                size_str = f"~{model['fallback_size']}"
-
-            models_list.append({
-                "name": name,
-                "size": size_str,
-                "description": model["description"],
-                "installed": is_installed,
-                "is_default": model["is_default"],
-                "ollama_available": ollama_available,
-            })
-
-        return Response({"models": models_list, "ollama_available": ollama_available})
-
-
-
-
-class OllamaModelPullView(APIView):
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        ollama_url = get_ollama_base_url()
-
-        model_name = request.GET.get('model', 'gemma4:e2b')
-        if model_name not in SUPPORTED_OLLAMA_MODEL_NAMES:
-            return Response({"error": f"Unsupported model: {model_name}"}, status=status.HTTP_400_BAD_REQUEST)
-
-        def event_stream():
-            pull_url = f"{ollama_url}/api/pull"
-            payload = {"model": model_name, "stream": True}
-            try:
-                # 20 minute timeout for large models
-                response = requests.post(pull_url, json=payload, stream=True, timeout=1200)
-                if response.status_code == 200:
-                    for line in response.iter_lines():
-                        if line:
-                            yield f"data: {line.decode('utf-8')}\n\n"
-                else:
-                    yield f"data: {json.dumps({'error': f'Ollama returned status {response.status_code}: {response.text[:200]}'})}\n\n"
-            except Exception as e:
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
-
-        resp = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
-        resp['Cache-Control'] = 'no-cache'
-        resp['X-Accel-Buffering'] = 'no'
-        return resp
-
-
-class OllamaModelDeleteView(APIView):
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        ollama_url = get_ollama_base_url()
-
-        model_name = request.data.get('name')
-        if not model_name:
-            return Response({"error": "Model name is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        if model_name not in SUPPORTED_OLLAMA_MODEL_NAMES:
-            return Response({"error": f"Unsupported model: {model_name}"}, status=status.HTTP_400_BAD_REQUEST)
-
-        delete_url = f"{ollama_url}/api/delete"
-        payload = {"name": model_name}
-        try:
-            response = requests.delete(delete_url, json=payload, timeout=15)
-            if response.status_code in [200, 204]:
-                return Response({"success": True})
-            else:
-                return Response({"error": f"Ollama deletion failed ({response.status_code}): {response.text}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        api_key_configured = bool(os.environ.get("GROQ_API_KEY", "").strip())
+        return Response({
+            "provider": "groq",
+            "api_key_configured": api_key_configured,
+            "models": [
+                {
+                    "name": model["name"],
+                    "profile": model["profile"],
+                    "description": model["description"],
+                    "installed": api_key_configured,
+                    "is_default": model["is_default"],
+                }
+                for model in SUPPORTED_GROQ_MODELS
+            ],
+        })
 
 
 class StatelessEmbeddingsView(APIView):
     """
-    Stateless endpoint that generates embeddings for a batch of texts using Ollama.
+    Stateless endpoint that generates embeddings for a batch of texts using local Ollama bge-m3.
     Persists absolutely no user files or vector results on the server.
     """
     permission_classes = [AllowAny]
@@ -410,10 +422,8 @@ class StatelessEmbeddingsView(APIView):
         if not texts or not isinstance(texts, list):
             return Response({"error": "A list of 'texts' is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        model_name = request.data.get('model', 'bge-m3')
-
         try:
-            embeddings = generate_embeddings(texts, model=model_name)
+            embeddings = generate_embeddings(texts, model=OLLAMA_EMBEDDING_MODEL)
             return Response({
                 "embeddings": embeddings
             }, status=status.HTTP_200_OK)

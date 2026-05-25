@@ -14,7 +14,14 @@ AI_SERVICES_DIR = Path(__file__).resolve().parents[2] / "ai-services"
 if str(AI_SERVICES_DIR) not in sys.path:
     sys.path.append(str(AI_SERVICES_DIR))
 
-from ollama_client import extract_metadata
+from groq_client import (
+    GROQ_TEXT_MODEL,
+    GROQ_VISION_MODEL,
+    extract_metadata,
+    generate_completion,
+    generate_vision_completion,
+)
+from ollama_client import OLLAMA_EMBEDDING_MODEL, generate_embeddings
 
 
 class RecallOSServerTests(APITestCase):
@@ -74,11 +81,34 @@ class RecallOSServerTests(APITestCase):
         mock_summary.assert_called_once_with(
             "First chunk text should not be reused directly. Later text explains the document purpose.",
             fallback_title="notes.txt",
+            model_profile="text",
         )
         self.assertEqual(ChatSession.objects.count(), 0)
         self.assertEqual(ChatMessage.objects.count(), 0)
 
-    @patch('ollama_client.generate_completion')
+    @patch('core.views.generate_document_category')
+    def test_transient_document_category_uses_summary_and_chunks(self, mock_category):
+        mock_category.return_value = "Technology"
+
+        response = self.client.post(reverse('document_category'), {
+            "filename": "notes.txt",
+            "summary": "A summary about semantic document search and local AI.",
+            "chunks": [
+                {"content": "The system indexes chunks with embeddings for RAG search."},
+                {"text": "Users can ask questions over their local knowledge base."},
+            ],
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["category"], "Technology")
+        mock_category.assert_called_once_with(
+            "The system indexes chunks with embeddings for RAG search.\n\nUsers can ask questions over their local knowledge base.",
+            summary="A summary about semantic document search and local AI.",
+            fallback_title="notes.txt",
+            model_profile="text",
+        )
+
+    @patch('groq_client.generate_completion')
     def test_extract_metadata_generates_llm_summary_when_json_summary_missing(self, mock_completion):
         document_text = (
             "This is the first indexed text portion and should not be reused as the summary. "
@@ -97,7 +127,7 @@ class RecallOSServerTests(APITestCase):
         self.assertNotEqual(metadata['summary'], document_text[:len(metadata['summary'])])
         self.assertEqual(mock_completion.call_count, 2)
 
-    @patch('ollama_client.generate_completion')
+    @patch('groq_client.generate_completion')
     def test_extract_metadata_regenerates_summary_when_json_summary_copies_source(self, mock_completion):
         copied_summary = "This is the first indexed text portion and should not be reused as the summary."
         document_text = (
@@ -117,7 +147,7 @@ class RecallOSServerTests(APITestCase):
 
     @patch('core.views.generate_completion')
     def test_chat_session_and_message_without_server_document_search(self, mock_completion):
-        mock_completion.return_value = "The answer uses the supplied local context."
+        mock_completion.return_value = "The answer uses the supplied local context. [S1]"
 
         session_response = self.client.post(reverse('chatsession-list'), {
             "title": "Local Context Dialogue"
@@ -154,19 +184,145 @@ class RecallOSServerTests(APITestCase):
         self.assertEqual(detail_response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(detail_response.data['messages']), 2)
 
-    @patch('core.views.requests.get')
-    def test_model_list_marks_supported_installed_ollama_models(self, mock_get):
-        mock_get.return_value.status_code = status.HTTP_200_OK
-        mock_get.return_value.json.return_value = {
-            "models": [
-                {"name": "gemma4:e2b", "size": int(6.7 * 1024 * 1024 * 1024)},
-            ]
-        }
+    @patch('core.views.generate_completion')
+    def test_chat_message_sources_include_only_cited_context_documents(self, mock_completion):
+        mock_completion.return_value = "The requested text is about local AI memory. [S2]"
 
+        session_response = self.client.post(reverse('chatsession-list'), {
+            "title": "Source Filtering"
+        }, format='json')
+        session_id = session_response.data['id']
+
+        message_response = self.client.post(reverse('chat_message_create', kwargs={"session_id": session_id}), {
+            "content": "What is large_test_text_english.txt about?",
+            "context_chunks": [
+                {
+                    "document_id": "cv-doc",
+                    "filename": "CV_Fedor_Rumiantsev.pdf",
+                    "suggested_title": "CV Fedor",
+                    "chunk_index": 0,
+                    "page_number": 1,
+                    "section_title": "Experience",
+                    "content": "Experience and employment history.",
+                },
+                {
+                    "document_id": "large-text-doc",
+                    "filename": "large_test_text_english.txt",
+                    "suggested_title": "large_test_text_english.txt",
+                    "chunk_index": 0,
+                    "page_number": 1,
+                    "section_title": "Document",
+                    "content": "This text discusses local AI memory systems.",
+                },
+            ],
+        }, format='json')
+
+        self.assertEqual(message_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(message_response.data['content'], "The requested text is about local AI memory.")
+        self.assertEqual(len(message_response.data['sources']), 1)
+        self.assertEqual(message_response.data['sources'][0]['document_id'], 'large-text-doc')
+
+    @patch('core.views.generate_completion')
+    def test_chat_message_sources_do_not_accumulate_between_answers(self, mock_completion):
+        mock_completion.side_effect = [
+            "The first answer uses the CV. [S1]",
+            "The second answer uses the text file. [S1]",
+        ]
+
+        session_response = self.client.post(reverse('chatsession-list'), {
+            "title": "Fresh Sources"
+        }, format='json')
+        session_id = session_response.data['id']
+        message_url = reverse('chat_message_create', kwargs={"session_id": session_id})
+
+        first_response = self.client.post(message_url, {
+            "content": "What is in the CV?",
+            "context_chunks": [{
+                "document_id": "cv-doc",
+                "filename": "CV_Fedor_Rumiantsev.pdf",
+                "suggested_title": "CV Fedor",
+                "chunk_index": 0,
+                "page_number": 1,
+                "section_title": "Experience",
+                "content": "Experience and employment history.",
+            }],
+        }, format='json')
+
+        second_response = self.client.post(message_url, {
+            "content": "What is in the large text file?",
+            "context_chunks": [{
+                "document_id": "large-text-doc",
+                "filename": "large_test_text_english.txt",
+                "suggested_title": "large_test_text_english.txt",
+                "chunk_index": 0,
+                "page_number": 1,
+                "section_title": "Document",
+                "content": "This text discusses local AI memory systems.",
+            }],
+        }, format='json')
+
+        self.assertEqual(first_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(first_response.data['sources'][0]['document_id'], 'cv-doc')
+        self.assertEqual(second_response.data['sources'][0]['document_id'], 'large-text-doc')
+
+    def test_model_list_reports_groq_text_and_vision_models(self):
         response = self.client.get(reverse('models_list'))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['provider'], 'groq')
         models = response.data['models']
         names = [model['name'] for model in models]
-        self.assertEqual(names, ['gemma4:e2b'])
-        self.assertTrue(all(model['installed'] for model in models))
+        profiles = {model['name']: model['profile'] for model in models}
+        self.assertEqual(names, [GROQ_TEXT_MODEL, GROQ_VISION_MODEL])
+        self.assertEqual(profiles[GROQ_TEXT_MODEL], 'text')
+        self.assertEqual(profiles[GROQ_VISION_MODEL], 'vision')
+
+    @patch.dict('os.environ', {'GROQ_API_KEY': 'test-key'})
+    @patch('groq_client.requests.post')
+    def test_groq_text_completion_uses_default_text_model(self, mock_post):
+        mock_post.return_value.status_code = status.HTTP_200_OK
+        mock_post.return_value.json.return_value = {
+            "choices": [{"message": {"content": "text response"}}]
+        }
+
+        response = generate_completion("Hello", system_prompt="System")
+
+        self.assertEqual(response, "text response")
+        payload = mock_post.call_args.kwargs['json']
+        self.assertEqual(payload['model'], GROQ_TEXT_MODEL)
+        self.assertEqual(payload['messages'][0]['role'], 'system')
+        self.assertEqual(payload['messages'][1]['content'], 'Hello')
+
+    @patch.dict('os.environ', {'GROQ_API_KEY': 'test-key'})
+    @patch('groq_client.requests.post')
+    def test_groq_vision_completion_uses_vision_model_for_images(self, mock_post):
+        mock_post.return_value.status_code = status.HTTP_200_OK
+        mock_post.return_value.json.return_value = {
+            "choices": [{"message": {"content": "vision response"}}]
+        }
+
+        response = generate_vision_completion("Extract text", ["data:image/png;base64,abc"])
+
+        self.assertEqual(response, "vision response")
+        payload = mock_post.call_args.kwargs['json']
+        self.assertEqual(payload['model'], GROQ_VISION_MODEL)
+        content = payload['messages'][0]['content']
+        self.assertEqual(content[0]['type'], 'text')
+        self.assertEqual(content[1]['type'], 'image_url')
+
+    @patch('ollama_client.get_fallback_model')
+    @patch('ollama_client.requests.post')
+    def test_ollama_embeddings_use_bge_m3_batch_endpoint(self, mock_post, mock_fallback_model):
+        mock_fallback_model.return_value = "bge-m3"
+        mock_post.return_value.status_code = status.HTTP_200_OK
+        mock_post.return_value.json.return_value = {
+            "embeddings": [[0.1, 0.2, 0.3]]
+        }
+
+        embeddings = generate_embeddings(["hello world"])
+
+        self.assertEqual(embeddings, [[0.1, 0.2, 0.3]])
+        payload = mock_post.call_args.kwargs['json']
+        self.assertEqual(payload['model'], OLLAMA_EMBEDDING_MODEL)
+        self.assertEqual(payload['input'], ["hello world"])
