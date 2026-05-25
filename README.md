@@ -1,82 +1,236 @@
 # RecallOS Server
 
-RecallOS Server is the Django/Ollama backend for the client-first desktop app. It persists chat state, calls the host Ollama instance, and provides a stateless document processing fallback. It is not the source of truth for user documents.
+RecallOS Server is the Django/Ollama backend used by the RecallOS desktop client. It persists chat state, calls host Ollama for generation and embeddings, and provides stateless fallback document processing.
 
-## Responsibilities
+The server is not the source of truth for the user's document library. In the active architecture, document metadata, chunks, vectors, and search indexes live in the Tauri client.
 
-- Store chat sessions in Postgres.
-- Store chat messages and source snippets in Postgres.
-- Build the final LLM prompt from the user message and client-supplied local context.
-- Call Ollama through the configured `OLLAMA_BASE_URL`.
-- Process uploaded fallback files transiently through `/api/documents/process/`.
+## Runtime Role
+
+The server currently provides:
+
+- chat session persistence in Postgres;
+- chat message persistence in Postgres;
+- assistant message source persistence in Postgres;
+- final prompt construction from user message plus client-supplied `context_chunks`;
+- LLM generation through host Ollama;
+- stateless document fallback processing;
+- stateless document summary generation;
+- stateless embedding generation through host Ollama.
 
 ## Non-Responsibilities
 
-The active architecture contains no server-side document memory:
+The active implementation does not provide persistent server-side document memory:
 
-- no persistent user file storage;
+- no persistent uploaded file storage;
 - no persistent document metadata storage;
-- no persistent document chunks;
-- no server-side vector index for user documents;
-- no server-side semantic search.
+- no persistent document chunk storage;
+- no server-side vector database for user documents;
+- no server-side semantic search route;
+- no active `Document` or `DocumentChunk` Django models.
 
-There are no `Document` or `DocumentChunk` Django models in the active schema. The initial migration creates only chat tables.
+The initial migration creates chat tables only.
+
+## Dependencies
+
+The backend uses:
+
+- Django;
+- Django REST Framework;
+- PostgreSQL via `psycopg2-binary`;
+- `requests` for Ollama calls;
+- `PyPDF2` for PDF fallback extraction;
+- Pillow;
+- optional EasyOCR support in `ai-services/ocr_service.py`.
+
+`easyocr` is referenced by the OCR service but is not listed in `backend/requirements.txt`. If it is not installed, OCR falls back to descriptive placeholder text.
+
+## Docker Runtime
+
+`docker-compose.yml` runs:
+
+- `web`: the Django API on port `8000`;
+- `db`: PostgreSQL 16 on port `5432`.
+
+Ollama is expected to be installed on the host machine. The Docker web service points to host Ollama through:
+
+```text
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
+
+The default LLM model is configured as:
+
+```text
+OLLAMA_LLM_MODEL=gemma4:e2b
+```
+
+The embeddings endpoint defaults to model name:
+
+```text
+bge-m3
+```
 
 ## Active Endpoints
 
 ```text
+POST     /api/documents/process/
+POST     /api/documents/summary/
+POST     /api/embeddings/
 GET/POST /api/chat/session/
 GET      /api/chat/session/<id>/
 POST     /api/chat/session/<id>/message/
-POST     /api/documents/process/
 GET      /api/models/
-POST     /api/models/pull/
-DELETE   /api/models/delete/
+GET      /api/models/pull/?model=<name>
+POST     /api/models/delete/
 ```
 
-The client UI no longer exposes model download controls, because local client models are limited to BGE-M3 embeddings. The model endpoints are legacy/admin API surface.
+There are no persistent `/api/documents/` CRUD routes and no `/api/search/semantic/` route in the active API.
 
-There are no persistent `/api/documents/` routes and no `/api/search/semantic/` route.
+## Stateless Document Processing
 
-## Stateless Document Fallback
+`POST /api/documents/process/` accepts multipart file upload and returns extracted text plus metadata.
 
-`POST /api/documents/process/` accepts multipart file upload and returns:
+Example response:
 
 ```json
 {
   "filename": "document.pdf",
   "file_type": "pdf",
   "text": "...",
-  "chunks": [],
-  "suggested_title": "...",
+  "chunks": ["..."],
+  "suggested_title": "Document",
   "summary": "...",
   "category": "General",
-  "tags": []
+  "tags": ["AI-Ingested"]
 }
 ```
 
-The server uses temporary files for PDF/image extraction where needed and deletes them after processing. The client receives the result, computes BGE-M3 embeddings locally, and stores the document in local LanceDB.
+Supported fallback extraction currently includes:
+
+- text-like files;
+- Markdown;
+- common code/config formats;
+- CSV/HTML/CSS;
+- digital PDFs through `PyPDF2`;
+- images through optional EasyOCR.
+
+For digital PDFs, the server inserts `[Page N]` markers before page text. For scanned PDFs without extractable text, the server returns a scanned-PDF message rather than performing full PDF OCR.
+
+Temporary upload files are deleted after processing.
+
+## Stateless Summary Generation
+
+`POST /api/documents/summary/` accepts already extracted document text:
+
+```json
+{
+  "filename": "document.txt",
+  "text": "..."
+}
+```
+
+It calls the configured Ollama LLM through `generate_document_summary` and returns:
+
+```json
+{
+  "summary": "..."
+}
+```
+
+The endpoint persists nothing.
+
+## Stateless Embeddings
+
+`POST /api/embeddings/` accepts a list of text strings:
+
+```json
+{
+  "texts": ["first chunk", "second chunk"],
+  "model": "bge-m3"
+}
+```
+
+It returns:
+
+```json
+{
+  "embeddings": [[0.0]]
+}
+```
+
+The implementation calls host Ollama:
+
+1. First, `/api/embed` for batch embedding.
+2. If needed, `/api/embeddings` one text at a time.
+3. If Ollama embedding calls fail, it currently returns zero vectors sized to 1024 dimensions.
+
+The endpoint persists no vectors or user text.
 
 ## Chat Context
 
-The chat endpoint expects the client to send local retrieval output as `context_chunks`. Each chunk can include:
+The chat message endpoint expects the client to send local retrieval output as `context_chunks`:
 
-- `document_id`
-- `filename`
-- `suggested_title`
-- `chunk_index`
-- `page_number`
-- `section_title`
-- `content_type`
-- `reason`
-- `entities`
-- `content`
+```json
+{
+  "content": "question",
+  "context_chunks": [
+    {
+      "document_id": "local-123",
+      "filename": "notes.md",
+      "suggested_title": "Project Notes",
+      "chunk_index": 0,
+      "page_number": 1,
+      "section_title": "Overview",
+      "content_type": "paragraph",
+      "reason": "semantic_rerank",
+      "entities": {},
+      "content": "..."
+    }
+  ]
+}
+```
 
-The server prompt preserves this structure so the LLM can answer with source-aware context.
+The server:
 
-## Local Ollama
+1. Saves the user message.
+2. Converts up to 24 client context chunks into prompt context.
+3. Builds a system prompt that asks the LLM to cite document names, sections, and pages when available.
+4. Calls Ollama through `generate_completion`.
+5. Saves the assistant message with a `sources` array.
+6. Returns the serialized assistant message.
 
-Docker runs the Django server locally, but Ollama is expected to already be installed on the host machine. The container should point to the host Ollama URL through `OLLAMA_BASE_URL`.
+The server does not search documents itself in this flow.
+
+## Chat Persistence
+
+The active Django models are:
+
+- `ChatSession`
+- `ChatMessage`
+
+`ChatMessage.sources` stores source metadata derived from client-supplied context chunks.
+
+## Model Management Endpoints
+
+The model endpoints are still present:
+
+- `GET /api/models/`
+- `GET /api/models/pull/?model=<name>`
+- `POST /api/models/delete/`
+
+They are currently limited to the server's `SUPPORTED_OLLAMA_MODELS` list, which contains `gemma4:e2b`.
+
+The current client UI does not expose full model download controls.
+
+## Current Limitations
+
+- No server-side document database or vector index.
+- No server-side semantic search.
+- No persistent upload storage.
+- OCR requires optional EasyOCR installation; otherwise it returns fallback text.
+- Scanned PDFs are not fully OCR-processed by the PDF path.
+- Embedding failures currently degrade to zero vectors instead of failing the request.
+- Authentication is not enforced; endpoints use `AllowAny`.
+- Cloud API key environment variables exist in Docker config but are not part of the active RAG path.
 
 ## Verification
 
@@ -84,4 +238,10 @@ From `recall-server/backend`:
 
 ```bash
 DB_NAME=recallos_db DB_USER=recallos_admin DB_PASSWORD=admin_secure_password_replace_me DB_HOST=127.0.0.1 DB_PORT=5432 ../backend/.venv/bin/python manage.py test core
+```
+
+To check migrations without writing new files:
+
+```bash
+DB_NAME=recallos_db DB_USER=recallos_admin DB_PASSWORD=admin_secure_password_replace_me DB_HOST=127.0.0.1 DB_PORT=5432 ../backend/.venv/bin/python manage.py makemigrations --check --dry-run
 ```
