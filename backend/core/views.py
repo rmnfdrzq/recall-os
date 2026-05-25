@@ -43,6 +43,7 @@ from ocr_service import extract_text_from_image
 from ollama_client import (
     generate_completion,
     extract_metadata,
+    generate_document_summary,
     generate_embeddings,
 )
 from .models import ChatSession, ChatMessage
@@ -137,6 +138,30 @@ class StatelessDocumentProcessView(APIView):
             }, status=status.HTTP_200_OK)
         except Exception as e:
             logger.exception("Transient document processing failed for %s: %s", filename, e)
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class StatelessDocumentSummaryView(APIView):
+    """
+    Transient summary generation for client-first ingestion.
+    Receives already extracted document text, returns AI summary, and persists nothing.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        text = str(request.data.get('text') or '').strip()
+        filename = str(request.data.get('filename') or '').strip() or None
+
+        if not text:
+            return Response({"error": "Document text is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            summary = generate_document_summary(text, fallback_title=filename)
+            if not summary:
+                return Response({"error": "AI summary could not be generated"}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response({"summary": summary}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception("Transient document summary generation failed for %s: %s", filename or "untitled", e)
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -395,4 +420,3 @@ class StatelessEmbeddingsView(APIView):
         except Exception as e:
             logger.exception("Stateless embeddings batch generation failed")
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-

@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     StatelessDocumentProcessView,
+    StatelessDocumentSummaryView,
     ChatSessionViewSet,
     ChatMessageCreateView,
     OllamaModelListView,
@@ -15,6 +16,7 @@ router.register(r'chat/session', ChatSessionViewSet, basename='chatsession')
 
 urlpatterns = [
     path('documents/process/', StatelessDocumentProcessView.as_view(), name='document_process'),
+    path('documents/summary/', StatelessDocumentSummaryView.as_view(), name='document_summary'),
     path('embeddings/', StatelessEmbeddingsView.as_view(), name='embeddings'),
 
     # DRF ViewSets

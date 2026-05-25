@@ -60,6 +60,24 @@ class RecallOSServerTests(APITestCase):
         self.assertEqual(ChatSession.objects.count(), 0)
         self.assertEqual(ChatMessage.objects.count(), 0)
 
+    @patch('core.views.generate_document_summary')
+    def test_transient_document_summary_generates_from_extracted_text(self, mock_summary):
+        mock_summary.return_value = "The AI summary explains the document's purpose without copying the first chunk."
+
+        response = self.client.post(reverse('document_summary'), {
+            "text": "First chunk text should not be reused directly. Later text explains the document purpose.",
+            "filename": "notes.txt",
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["summary"], "The AI summary explains the document's purpose without copying the first chunk.")
+        mock_summary.assert_called_once_with(
+            "First chunk text should not be reused directly. Later text explains the document purpose.",
+            fallback_title="notes.txt",
+        )
+        self.assertEqual(ChatSession.objects.count(), 0)
+        self.assertEqual(ChatMessage.objects.count(), 0)
+
     @patch('ollama_client.generate_completion')
     def test_extract_metadata_generates_llm_summary_when_json_summary_missing(self, mock_completion):
         document_text = (
