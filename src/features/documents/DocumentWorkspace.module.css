@@ -3,6 +3,8 @@
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+  scroll-padding-block: 1rem;
   padding: 1.25rem;
   background: var(--panel-bg-heavy);
   height: 100%;

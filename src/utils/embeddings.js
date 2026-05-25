@@ -4,7 +4,7 @@ const EMBEDDINGS_ENDPOINT = `${BACKEND_HOST}/api/embeddings/`;
 
 /**
  * Calculates high-dimensional vector embeddings for a list of text strings in batch
- * using the stateless server API backed by host Ollama.
+ * using the stateless server API.
  * @param {Array<string>} texts - List of text chunks to calculate embeddings for
  * @param {Function} [onProgress] - Optional progress callback
  * @returns {Promise<Array<Array<number>>>}

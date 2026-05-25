@@ -1,18 +1,17 @@
 import { Search, Sparkles } from "lucide-react";
-import { Button, Skeleton } from "../../ui";
+import { Button, Panel, Skeleton } from "../../ui";
 import { SearchResultCard } from "./SearchResultCard";
 import styles from "./SearchResultsOverlay.module.css";
 
-export function SearchResultsOverlay({ isOpen, isSearching, results, onClose, onOpenResult }) {
-  if (!isOpen) return null;
+export function SearchResultsOverlay({ isSearching, results, onClose, onOpenResult }) {
   return (
-    <div className={styles.overlay}>
+    <Panel as="section" className={styles.results} variant="heavy">
       <div className={styles.header}>
         <h2 className={styles.title}>
           <Sparkles size={18} className={styles.accentIcon} />
           <span>Semantic Search Results</span>
         </h2>
-        <Button variant="secondary" size="sm" onClick={onClose}>Close Results</Button>
+        <Button variant="ghost" size="sm" onClick={onClose}>Close Results</Button>
       </div>
       <div className={styles.list}>
         {isSearching ? (
@@ -31,6 +30,6 @@ export function SearchResultsOverlay({ isOpen, isSearching, results, onClose, on
           ))
         )}
       </div>
-    </div>
+    </Panel>
   );
 }

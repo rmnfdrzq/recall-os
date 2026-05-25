@@ -9,3 +9,5 @@ export const getBackendHost = () => {
 export const BACKEND_HOST = getBackendHost();
 export const API_BASE = `${BACKEND_HOST}/api`;
 export const SERVER_PROCESS_ENDPOINT = `${API_BASE}/documents/process/`;
+export const SERVER_SUMMARY_ENDPOINT = `${API_BASE}/documents/summary/`;
+export const SERVER_CATEGORY_ENDPOINT = `${API_BASE}/documents/category/`;

@@ -9,3 +9,4 @@ export { ProgressBar } from "./ProgressBar";
 export { Skeleton } from "./Skeleton";
 export { Tabs } from "./Tabs";
 export { TextInput } from "./TextInput";
+export { Toast } from "./Toast";

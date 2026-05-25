@@ -6,7 +6,7 @@ import { DocumentPreview } from "./DocumentPreview";
 import { DocumentSummary } from "./DocumentSummary";
 import styles from "./DocumentWorkspace.module.css";
 
-export function DocumentWorkspace({ doc, isLoading, debugMode, onClose }) {
+export function DocumentWorkspace({ doc, isLoading, debugMode, onClose, onRegenerateSummary }) {
   return (
     <Panel className={styles.workspace} variant="heavy">
       {isLoading ? (
@@ -20,7 +20,7 @@ export function DocumentWorkspace({ doc, isLoading, debugMode, onClose }) {
       ) : doc ? (
         <div className={styles.content}>
           <DocumentHeader doc={doc} onClose={onClose} />
-          <DocumentSummary doc={doc} />
+          <DocumentSummary doc={doc} onRegenerate={onRegenerateSummary} />
           <DocumentPreview doc={doc} />
           {debugMode && <DebugChunks chunks={doc.chunks} />}
         </div>

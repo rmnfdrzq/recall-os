@@ -9,11 +9,14 @@ export function ChatSidebar({
   documents,
   isSending,
   inputValue,
+  selectedScopeDocumentIds,
   bottomRef,
   onInputChange,
   onSubmit,
   onCreateSession,
   onSelectDocument,
+  onSelectDocumentScope,
+  onRemoveDocumentScope,
 }) {
   return (
     <Panel as="aside" className={styles.sidebar} variant="heavy">
@@ -34,7 +37,15 @@ export function ChatSidebar({
         bottomRef={bottomRef}
         onSelectDocument={onSelectDocument}
       />
-      <ChatInput value={inputValue} onChange={onInputChange} onSubmit={onSubmit} />
+      <ChatInput
+        value={inputValue}
+        onChange={onInputChange}
+        onSubmit={onSubmit}
+        documents={documents}
+        selectedDocumentIds={selectedScopeDocumentIds}
+        onSelectDocumentScope={onSelectDocumentScope}
+        onRemoveDocumentScope={onRemoveDocumentScope}
+      />
     </Panel>
   );
 }

@@ -11,7 +11,7 @@ export function SearchBar({ value, onChange, onSubmit }) {
           icon={<Search size={18} />}
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          placeholder="Ask about anything, e.g.: 'Kubernetes node status' or 'README.md summary'..."
+          placeholder="Smart search across documents and content..."
         />
         <Button type="submit" pill className={styles.button}>Search</Button>
       </form>

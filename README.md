@@ -28,7 +28,7 @@ The active client does not upload files for persistent server storage. Fallback 
 - Django backend reachable at `http://127.0.0.1:8000` in desktop/dev mode.
 - Host Ollama reachable by the backend through `OLLAMA_BASE_URL`.
 - An Ollama embedding model compatible with `bge-m3`.
-- An Ollama LLM model configured by the backend, currently defaulting to `gemma4:e2b`.
+- An Ollama LLM model configured by the backend, currently defaulting to `gemma4:31b-cloud`.
 
 Browser-only mode is limited. Client-first indexing and semantic search require the desktop app and local LanceDB.
 

@@ -23,6 +23,8 @@
 .content {
   flex: 1;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+  scroll-padding-block: 1rem;
   max-height: 420px;
   padding-right: 0.25rem;
   display: flex;

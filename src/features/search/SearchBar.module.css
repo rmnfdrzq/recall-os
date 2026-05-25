@@ -2,30 +2,39 @@
   padding: 1rem;
   margin-bottom: 0.75rem;
   background: var(--panel-bg-heavy);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.shell:focus-within {
+  border-color: rgba(124, 58, 237, 0.34);
+  box-shadow: 0 10px 28px rgba(124, 58, 237, 0.12);
 }
 
 .form {
   position: relative;
   display: flex;
   width: 100%;
-}
-
-.form::before {
-  content: '';
-  position: absolute;
-  inset: -1px;
-  background: var(--accent-gradient);
-  border-radius: 9999px;
-  z-index: -1;
-  opacity: 0;
-  filter: blur(12px);
-  transition: var(--transition-smooth);
-}
-
-.form:focus-within::before {
-  opacity: 0.7;
+  gap: 0.5rem;
 }
 
 .button {
-  margin-left: 0.5rem;
+  flex: 0 0 auto;
+  box-shadow: 0 8px 22px rgba(124, 58, 237, 0.22);
+}
+
+.form :global(input) {
+  background: rgba(255, 255, 255, 0.55);
+  border-color: rgba(124, 58, 237, 0.24);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+}
+
+.form :global(input:focus) {
+  border-color: rgba(99, 102, 241, 0.78);
+  box-shadow:
+    0 0 0 3px rgba(124, 58, 237, 0.12),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+
+.form :global(input::placeholder) {
+  color: rgba(100, 116, 139, 0.72);
 }

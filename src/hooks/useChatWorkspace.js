@@ -4,12 +4,14 @@ import { API_BASE } from "../lib/appConfig";
 import { isDesktop } from "../lib/desktop";
 import { generateServerEmbedding } from "../utils/embeddings";
 import { buildEnhancedContext } from "../utils/documentIntelligence";
+import { findReferencedDocuments, getScopedDocuments } from "../utils/chatScope";
 
 export function useChatWorkspace({ documents }) {
   const [chatSessions, setChatSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
+  const [selectedScopeDocumentIds, setSelectedScopeDocumentIds] = useState([]);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const chatBottomRef = useRef(null);
 
@@ -78,16 +80,39 @@ export function useChatWorkspace({ documents }) {
     }
   };
 
-  const getLocalChatContext = async (query) => {
+  const addScopeDocument = (documentId) => {
+    setSelectedScopeDocumentIds((prev) => (
+      prev.includes(documentId) ? prev : [...prev, documentId]
+    ));
+  };
+
+  const removeScopeDocument = (documentId) => {
+    setSelectedScopeDocumentIds((prev) => prev.filter((id) => id !== documentId));
+  };
+
+  const getLocalChatContext = async (query, scopeDocumentIds = []) => {
     if (!isDesktop()) return [];
     try {
       const queryVector = await generateServerEmbedding(query);
-      const localResults = await invoke("search_local_vectors", { queryVector, limit: 50 });
+      const referencedDocuments = scopeDocumentIds.length > 0 ? [] : findReferencedDocuments(query, documents);
+      const effectiveScopeDocumentIds = scopeDocumentIds.length > 0
+        ? scopeDocumentIds
+        : referencedDocuments.map((document) => document.id);
+      const hasExplicitScope = effectiveScopeDocumentIds.length > 0;
+      const scopedDocumentIdSet = new Set(effectiveScopeDocumentIds);
+      const scopedDocuments = getScopedDocuments(documents, effectiveScopeDocumentIds);
+      const localResults = await invoke("search_local_vectors", { queryVector, limit: hasExplicitScope ? 200 : 50 });
+      const scopedResults = hasExplicitScope
+        ? localResults.filter((item) => scopedDocumentIdSet.has(item.document_id))
+        : localResults;
       return await buildEnhancedContext({
         query,
-        vectorResults: localResults,
-        documents,
-        fetchDocumentDetail: async (documentId) => await invoke("get_local_document", { documentId }),
+        vectorResults: scopedResults,
+        documents: scopedDocuments,
+        fetchDocumentDetail: async (documentId) => {
+          if (hasExplicitScope && !scopedDocumentIdSet.has(documentId)) return null;
+          return await invoke("get_local_document", { documentId });
+        },
         maxContextChars: 12000,
       });
     } catch (err) {
@@ -101,7 +126,9 @@ export function useChatWorkspace({ documents }) {
     if (!chatInput.trim()) return;
 
     const userText = chatInput.trim();
+    const scopeDocumentIds = [...selectedScopeDocumentIds];
     setChatInput("");
+    setSelectedScopeDocumentIds([]);
     setChatMessages((prev) => [...prev, {
       id: `user-msg-${Date.now()}`,
       role: "user",
@@ -125,7 +152,7 @@ export function useChatWorkspace({ documents }) {
         currentSessionId = newSession.id;
       }
 
-      const contextChunks = await getLocalChatContext(userText);
+      const contextChunks = await getLocalChatContext(userText, scopeDocumentIds);
       const res = await fetch(`${API_BASE}/chat/session/${currentSessionId}/message/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -147,9 +174,12 @@ export function useChatWorkspace({ documents }) {
     activeSessionId,
     chatMessages,
     chatInput,
+    selectedScopeDocumentIds,
     isSendingMessage,
     chatBottomRef,
     setChatInput,
+    addScopeDocument,
+    removeScopeDocument,
     loadSessions,
     handleCreateSession,
     handleSendMessage,

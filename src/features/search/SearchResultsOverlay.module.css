@@ -1,17 +1,11 @@
-.overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 10;
-  background: var(--panel-bg-overlay);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border-radius: 12px;
+.results {
+  flex: 1;
+  min-height: 0;
   padding: 1.25rem;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--panel-border);
-  box-shadow: 0 20px 50px rgba(0,0,0,0.6);
   animation: fadeIn 0.2s ease-out;
+  overflow: hidden;
 }
 
 .header {
@@ -34,6 +28,8 @@
 .list {
   flex: 1;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+  scroll-padding-block: 1rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;

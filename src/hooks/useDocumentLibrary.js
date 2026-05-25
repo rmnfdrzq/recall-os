@@ -3,10 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { SERVER_PROCESS_ENDPOINT } from "../lib/appConfig";
 import { IMAGE_EXTENSIONS, getExtension, getFilename, inferFileType } from "../lib/fileTypes";
 import { isDesktop } from "../lib/desktop";
-import { buildDocumentSummary, buildSmartChunks } from "../utils/documentIntelligence";
+import { buildSmartChunks } from "../utils/documentIntelligence";
 import { cacheEmbedding, computeTextHash, getCachedEmbedding } from "../utils/embeddingsCache";
 import { generateServerEmbeddingsBatch } from "../utils/embeddings";
-import { normalizeLocalDocument } from "../lib/documentPreview";
+import { getFullDocumentContent, normalizeLocalDocument } from "../lib/documentPreview";
+import { generateAiDocumentCategory } from "../lib/aiCategory";
+import { SUMMARY_GENERATING_TEXT, generateAiDocumentSummary } from "../lib/aiSummary";
 
 const chunksForDetails = (documentId, chunks) => chunks.map((chunk, index) => ({
   id: `chunk-${documentId}-${index}`,
@@ -16,7 +18,16 @@ const chunksForDetails = (documentId, chunks) => chunks.map((chunk, index) => ({
   metadata: JSON.stringify(chunk),
 }));
 
-export function useDocumentLibrary() {
+const textFromChunks = (chunks) => chunks
+  .map((chunk) => (typeof chunk === "string" ? chunk : chunk.content || chunk.text || ""))
+  .filter((content) => content.trim())
+  .join("\n\n");
+
+const modelProfileForExtension = (extension) => (
+  IMAGE_EXTENSIONS.has(extension) || extension === "pdf" ? "vision" : "text"
+);
+
+export function useDocumentLibrary({ onNotify } = {}) {
   const [documents, setDocuments] = useState([]);
   const [selectedDocId, setSelectedDocId] = useState(null);
   const [selectedDocDetails, setSelectedDocDetails] = useState(null);
@@ -141,6 +152,7 @@ export function useDocumentLibrary() {
     setIsUploading(true);
     const filename = getFilename(filePath || fileObject?.name || "document");
     const extension = getExtension(filename);
+    const modelProfile = modelProfileForExtension(extension);
     const now = new Date().toISOString();
     const newDocId = `local-${Date.now()}`;
 
@@ -152,7 +164,7 @@ export function useDocumentLibrary() {
         status: "processing",
         summary: "",
         suggested_title: filename,
-        category: "General",
+        category: "",
         tags: [],
         file_path: filePath || "",
         created_at: now,
@@ -187,17 +199,56 @@ export function useDocumentLibrary() {
         if (chunks.length === 0) throw new Error("Server fallback did not return indexable text chunks.");
       }
 
-      const indexedDoc = await saveLocalDocument({
+      const summarizingDoc = await saveLocalDocument({
         ...localDoc,
-        status: "indexed_text",
-        summary: metadata.summary || localDoc.summary || buildDocumentSummary(filename, text, chunks),
+        status: "summarizing",
+        summary: SUMMARY_GENERATING_TEXT,
         suggested_title: metadata.suggested_title || filename,
-        category: metadata.category || "General",
+        category: "",
         tags: Array.isArray(metadata.tags) ? metadata.tags : ["AI-Ingested"],
         updated_at: new Date().toISOString(),
       });
 
       setSelectedDocId(newDocId);
+      setSelectedDocDetails({ ...summarizingDoc, chunks: chunksForDetails(newDocId, chunks) });
+
+      let summaryText = "";
+      try {
+        summaryText = await generateAiDocumentSummary({
+          filename,
+          text: text || textFromChunks(chunks),
+          modelProfile,
+        });
+      } catch (summaryError) {
+        console.error("AI summary generation failed:", summaryError);
+        onNotify?.({
+          type: "error",
+          message: "Document was loaded, but AI summary could not be generated.",
+        });
+      }
+
+      let category = "General";
+      if (summaryText) {
+        try {
+          category = await generateAiDocumentCategory({
+            filename,
+            summary: summaryText,
+            chunks,
+            modelProfile,
+          });
+        } catch (categoryError) {
+          console.error("AI category generation failed:", categoryError);
+        }
+      }
+
+      const indexedDoc = await saveLocalDocument({
+        ...summarizingDoc,
+        status: "indexed_text",
+        summary: summaryText,
+        category,
+        updated_at: new Date().toISOString(),
+      });
+
       setSelectedDocDetails({ ...indexedDoc, chunks: chunksForDetails(newDocId, chunks) });
       setIsUploading(false);
 
@@ -221,7 +272,7 @@ export function useDocumentLibrary() {
       }
     } catch (err) {
       console.error("Local document ingestion pipeline failed:", err);
-      await saveLocalDocument({
+      const failedDoc = await saveLocalDocument({
         id: newDocId,
         filename,
         file_type: inferFileType(filename),
@@ -234,6 +285,8 @@ export function useDocumentLibrary() {
         created_at: now,
         updated_at: new Date().toISOString(),
       });
+      setSelectedDocId(newDocId);
+      setSelectedDocDetails({ ...failedDoc, chunks: [] });
       alert("Failed to index local document: " + err.message);
       setIsUploading(false);
     }
@@ -293,16 +346,117 @@ export function useDocumentLibrary() {
 
   const handleDeleteDoc = async (docId, event) => {
     event?.stopPropagation();
-    if (!confirm("Are you sure you want to delete this document?")) return;
+    event?.preventDefault();
+
+    const previousDocuments = documents;
+    const wasSelected = selectedDocId === docId || selectedDocDetails?.id === docId;
+
+    setDocuments((prev) => prev.filter((doc) => doc.id !== docId));
+    if (wasSelected) {
+      setSelectedDocId(null);
+      setSelectedDocDetails(null);
+    }
+
     try {
-      if (isDesktop()) await invoke("delete_local_document", { documentId: docId });
-      setDocuments((prev) => prev.filter((doc) => doc.id !== docId));
-      if (selectedDocId === docId) {
-        setSelectedDocId(null);
-        setSelectedDocDetails(null);
+      if (isDesktop()) {
+        await invoke("delete_local_document", { documentId: docId });
       }
     } catch (err) {
+      console.error("Error deleting local document:", err);
       alert("Error deleting document: " + err.message);
+      try {
+        await refreshLocalDocuments();
+      } catch {
+        setDocuments(previousDocuments);
+      }
+    }
+  };
+
+  const handleRegenerateSummary = async (docId) => {
+    const listDoc = documents.find((doc) => doc.id === docId);
+    let detailDoc = selectedDocDetails?.id === docId ? selectedDocDetails : null;
+    let targetDoc = null;
+    let previousDoc = null;
+
+    try {
+      if (!detailDoc && isDesktop()) {
+        detailDoc = normalizeLocalDocument(await invoke("get_local_document", { documentId: docId }));
+      }
+
+      targetDoc = normalizeLocalDocument({ ...(listDoc || {}), ...(detailDoc || {}) });
+      const documentText = getFullDocumentContent(targetDoc).trim();
+      if (!documentText) {
+        throw new Error("Document text is not available for summary regeneration.");
+      }
+
+      previousDoc = {
+        ...targetDoc,
+        status: targetDoc.status === "summarizing" ? "processed" : targetDoc.status || "processed",
+        summary: targetDoc.summary === SUMMARY_GENERATING_TEXT ? "" : targetDoc.summary || "",
+      };
+      const summarizingDoc = normalizeLocalDocument({
+        ...targetDoc,
+        status: "summarizing",
+        summary: SUMMARY_GENERATING_TEXT,
+        updated_at: new Date().toISOString(),
+      });
+
+      setDocuments((prev) => [summarizingDoc, ...prev.filter((doc) => doc.id !== docId)]);
+      if (selectedDocId === docId || selectedDocDetails?.id === docId) {
+        setSelectedDocDetails({ ...summarizingDoc, chunks: targetDoc.chunks || [] });
+      }
+
+      const summary = await generateAiDocumentSummary({
+        filename: targetDoc.filename,
+        text: documentText,
+        modelProfile: modelProfileForExtension(getExtension(targetDoc.filename || "")),
+      });
+      let category = previousDoc.category || "General";
+      try {
+        category = await generateAiDocumentCategory({
+          filename: targetDoc.filename,
+          summary,
+          chunks: targetDoc.chunks || [],
+          modelProfile: modelProfileForExtension(getExtension(targetDoc.filename || "")),
+        });
+      } catch (categoryError) {
+        console.error("AI category regeneration failed:", categoryError);
+      }
+
+      const updatedDoc = await saveLocalDocument({
+        ...summarizingDoc,
+        status: previousDoc.status === "summarizing" ? "processed" : previousDoc.status,
+        summary,
+        category,
+        updated_at: new Date().toISOString(),
+      });
+
+      if (selectedDocId === docId || selectedDocDetails?.id === docId) {
+        setSelectedDocDetails({ ...updatedDoc, chunks: targetDoc.chunks || [] });
+      }
+    } catch (err) {
+      console.error("Error regenerating summary:", err);
+      if (previousDoc) {
+        const restoredDoc = {
+          ...previousDoc,
+          updated_at: new Date().toISOString(),
+        };
+        if (targetDoc?.status === "summarizing" || targetDoc?.summary === SUMMARY_GENERATING_TEXT) {
+          try {
+            await saveLocalDocument(restoredDoc);
+          } catch {
+            // State restoration below still keeps the UI out of the loading state.
+          }
+        }
+        setDocuments((prev) => [restoredDoc, ...prev.filter((doc) => doc.id !== restoredDoc.id)]);
+        if (selectedDocId === docId || selectedDocDetails?.id === docId) {
+          setSelectedDocDetails({ ...restoredDoc, chunks: targetDoc?.chunks || [] });
+        }
+      }
+      onNotify?.({
+        type: "error",
+        message: "Summary was not regenerated. The previous summary has been restored.",
+      });
     }
   };
 
@@ -327,6 +481,7 @@ export function useDocumentLibrary() {
     handleFileSelect,
     handleSelectDocument,
     handleDeleteDoc,
+    handleRegenerateSummary,
     closePreview,
   };
 }

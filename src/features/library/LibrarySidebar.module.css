@@ -1,8 +1,8 @@
 .sidebar {
-  margin: 0.75rem 0 0.75rem 0.75rem;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 1.5rem);
+  height: 100%;
   overflow: hidden;
 }
 
@@ -56,6 +56,8 @@
 .list {
   flex: 1;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+  scroll-padding-block: 1rem;
   padding: 0 1rem 1rem;
   display: flex;
   flex-direction: column;

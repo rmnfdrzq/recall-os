@@ -11,6 +11,9 @@ import {
   getFullDocumentContent,
   normalizeLocalDocument
 } from './documentView.js';
+import {
+  getSummaryText
+} from '../lib/summary.js';
 
 test('buildSmartChunks stores section, page and neighbor metadata', () => {
   const chunks = buildSmartChunks(`[Page 1]
@@ -81,6 +84,15 @@ test('normalizeLocalDocument preserves detail chunks for markdown preview', () =
 
   assert.equal(normalized.chunks.length, 2);
   assert.equal(getFullDocumentContent(normalized), '# Title\n\nBody text');
+});
+
+test('getSummaryText shows generation state while AI summary is pending', () => {
+  const summaryText = getSummaryText({
+    status: 'summarizing',
+    summary: ''
+  });
+
+  assert.equal(summaryText, 'Generating AI summary...');
 });
 
 test('buildEnhancedContext expands from semantic hit to neighboring and section chunks', async () => {
