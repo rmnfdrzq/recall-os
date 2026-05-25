@@ -91,6 +91,58 @@ const splitIntoParagraphs = (text) => (
     .filter(Boolean)
 );
 
+const stripMarkdownSyntax = (text = '') => (
+  String(text)
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[[^\]]*]\([^)]+\)/g, ' ')
+    .replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/^\s*\d+[.)]\s+/gm, '')
+    .replace(/[*_~>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+);
+
+const splitIntoSentences = (text = '') => (
+  stripMarkdownSyntax(text)
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map(sentence => sentence.trim())
+    .filter(sentence => sentence.length >= 35 && /[\p{L}\p{N}]/u.test(sentence))
+);
+
+const extractDocumentTitle = (filename, text = '') => {
+  const heading = String(text).match(/^\s*#\s+(.+)$/m);
+  if (heading?.[1]) return stripMarkdownSyntax(heading[1]).slice(0, 90);
+
+  const fallback = String(filename || 'This document')
+    .replace(/\.[^.]+$/, '')
+    .replace(/[-_]+/g, ' ')
+    .trim();
+  return fallback || 'This document';
+};
+
+const buildContentSummary = (filename, text) => {
+  const title = extractDocumentTitle(filename, text);
+  const paragraphs = splitIntoParagraphs(text)
+    .map(stripMarkdownSyntax)
+    .filter(part => part.length >= 35);
+  const sentences = splitIntoSentences(text);
+  const candidates = [...sentences, ...paragraphs]
+    .map(part => part.replace(/\s+/g, ' ').trim())
+    .filter((part, index, all) => part && all.indexOf(part) === index)
+    .filter(part => normalizeText(part) !== normalizeText(title));
+
+  const selected = candidates.slice(0, 2);
+  if (selected.length === 0) {
+    return `${title} contains extracted text, but there is not enough readable prose to summarize meaningfully.`;
+  }
+
+  const summaryBody = selected.join(' ');
+  return `${title}: ${summaryBody}`.slice(0, 700);
+};
+
 export const buildSmartChunks = (text, {
   filename = 'document',
   maxLength = 2000,
@@ -170,12 +222,14 @@ export const buildSmartChunks = (text, {
 
 export const buildDocumentSummary = (filename, text, chunks = []) => {
   const entities = extractEntities(text);
-  const sections = Array.from(new Set(chunks.map(chunk => chunk.section_title).filter(Boolean))).slice(0, 8);
-  const orgs = entities.organizations.slice(0, 6);
   const technologies = entities.technologies.slice(0, 8);
-  const parts = [`Indexed locally from ${filename}.`];
-  if (sections.length) parts.push(`Detected sections: ${sections.join(', ')}.`);
-  if (orgs.length) parts.push(`Organizations mentioned: ${orgs.join(', ')}.`);
+  const sections = Array.from(new Set(
+    chunks
+      .map(chunk => chunk.section_title)
+      .filter(title => title && title !== 'Document')
+  )).slice(0, 4);
+  const parts = [buildContentSummary(filename, text)];
+  if (sections.length) parts.push(`Main sections: ${sections.join(', ')}.`);
   if (technologies.length) parts.push(`Technologies mentioned: ${technologies.join(', ')}.`);
   return parts.join(' ');
 };

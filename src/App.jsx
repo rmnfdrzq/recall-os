@@ -33,6 +33,10 @@ import {
   buildEnhancedContext,
   buildSmartChunks,
 } from "./utils/documentIntelligence";
+import {
+  getFullDocumentContent,
+  normalizeLocalDocument,
+} from "./utils/documentView";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 
 const getStatusBadgeStyles = (status) => {
@@ -114,25 +118,6 @@ const inferFileType = (filename) => {
   return "text";
 };
 
-const normalizeLocalDocument = (doc) => {
-  if (!doc) return {};
-  return {
-    id: doc.id || "",
-    filename: doc.filename || "",
-    file_type: doc.file_type || doc.fileType || "",
-    status: doc.status || "pending",
-    summary: doc.summary || doc.description || "",
-    suggested_title:
-      doc.suggested_title || doc.suggestedTitle || doc.filename || "",
-    category: doc.category || "General",
-    tags: Array.isArray(doc.tags) ? doc.tags : [],
-    file_path: doc.file_path || doc.filePath || doc.file || "",
-    created_at: doc.created_at || doc.createdAt || new Date().toISOString(),
-    updated_at: doc.updated_at || doc.updatedAt || new Date().toISOString(),
-    file: doc.file || doc.file_path || doc.filePath || "",
-  };
-};
-
 const getFileUrl = (filePath) => {
   if (!filePath) return "";
   if (filePath.startsWith("http://") || filePath.startsWith("https://"))
@@ -189,6 +174,75 @@ const isDebugMode = () => {
     localStorage.getItem("recallosDebug") === "true" ||
     import.meta.env.VITE_RECALLOS_DEBUG === "true"
   );
+};
+
+const renderMarkdownToHtml = (markdown) => {
+  if (!markdown) return "";
+
+  let html = markdown
+    // Escape HTML to prevent XSS
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  // Code blocks (```lang ... ```)
+  html = html.replace(/```([\s\S]*?)```/g, (match, code) => {
+    return `<pre style="background: rgba(0,0,0,0.4); padding: 1rem; border-radius: 8px; font-family: monospace; font-size: 0.85rem; overflow-x: auto; border: 1px solid var(--panel-border); margin: 1rem 0; color: #a78bfa;"><code>${code.trim()}</code></pre>`;
+  });
+
+  // Blockquotes (> text)
+  html = html.replace(/^\s*&gt;\s*(.+)$/gm, '<blockquote style="border-left: 4px solid #7c3aed; padding-left: 1rem; color: var(--markdown-preview-muted); margin: 1rem 0; font-style: italic;">$1</blockquote>');
+
+  // Headers (# H1, ## H2, ### H3)
+  html = html.replace(/^\s*###\s+(.+)$/gm, '<h3 style="font-size: 1.1rem; font-weight: 800; color: var(--markdown-preview-text); margin: 1.25rem 0 0.5rem 0;">$1</h3>');
+  html = html.replace(/^\s*##\s+(.+)$/gm, '<h2 style="font-size: 1.3rem; font-weight: 800; color: var(--markdown-preview-text); margin: 1.5rem 0 0.75rem 0; border-bottom: 1px solid var(--panel-border); padding-bottom: 0.35rem;">$1</h2>');
+  html = html.replace(/^\s*#\s+(.+)$/gm, '<h1 style="font-size: 1.6rem; font-weight: 800; color: var(--markdown-preview-text); margin: 1.75rem 0 1rem 0;">$1</h1>');
+
+  // Bold (**text**)
+  html = html.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
+
+  // Inline code (`code`)
+  html = html.replace(/`([^`]+)`/g, '<code style="background: rgba(124, 58, 237, 0.1); padding: 0.15rem 0.35rem; border-radius: 4px; font-family: monospace; font-size: 0.85rem; color: #a78bfa;">$1</code>');
+
+  // Unordered Lists (- item or * item)
+  let inList = false;
+  const lines = html.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const match = line.match(/^\s*[-*]\s+(.+)$/);
+    if (match) {
+      let content = match[1];
+      if (!inList) {
+        lines[i] = `<ul style="margin: 0.75rem 0; padding-left: 1.5rem; list-style-type: disc; color: var(--markdown-preview-muted);"><li style="margin: 0.25rem 0;">${content}</li>`;
+        inList = true;
+      } else {
+        lines[i] = `<li style="margin: 0.25rem 0;">${content}</li>`;
+      }
+    } else {
+      if (inList) {
+        lines[i - 1] += '</ul>';
+        inList = false;
+      }
+    }
+  }
+  if (inList) {
+    lines[lines.length - 1] += '</ul>';
+  }
+  html = lines.join('\n');
+
+  // Links ([text](url))
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color: #a78bfa; text-decoration: underline; font-weight: 600;">$1</a>');
+
+  // Paragraphs (split by double newlines)
+  html = html.split(/\n\n+/).map(p => {
+    const trimmed = p.trim();
+    if (trimmed.startsWith('<h') || trimmed.startsWith('<pre') || trimmed.startsWith('<blockquote') || trimmed.startsWith('<ul') || trimmed.startsWith('</ul')) {
+      return p;
+    }
+    return `<p style="font-size: 0.9rem; color: var(--markdown-preview-muted); line-height: 1.6; margin: 0.75rem 0;">${p.replace(/\n/g, '<br/>')}</p>`;
+  }).join('\n');
+
+  return html;
 };
 
 export default function App() {
@@ -1253,8 +1307,55 @@ export default function App() {
             />
           </div>
         );
-      case "markdown":
-      case "text":
+      case "markdown": {
+        const fullContent = getFullDocumentContent(doc);
+        const htmlContent = renderMarkdownToHtml(fullContent);
+
+        return (
+          <div
+            className="glass-panel markdown-body"
+            style={{
+              width: "100%",
+              maxHeight: "800px",
+              overflowY: "auto",
+              padding: "1.5rem 2rem",
+              background: "var(--markdown-preview-bg)",
+              border: "1px solid var(--panel-border)",
+              borderRadius: "12px",
+              boxShadow: "none",
+              color: "var(--markdown-preview-text)",
+              textAlign: "left",
+            }}
+            dangerouslySetInnerHTML={{ __html: htmlContent }}
+          />
+        );
+      }
+      case "text": {
+        const fullContent = getFullDocumentContent(doc);
+        return (
+          <div
+            className="glass-panel"
+            style={{
+              width: "100%",
+              maxHeight: "600px",
+              overflowY: "auto",
+              padding: "1.5rem",
+              background: "var(--surface-subtle)",
+              border: "1px solid var(--panel-border)",
+              borderRadius: "12px",
+              boxShadow: "inset 0 0 20px rgba(0,0,0,0.2)",
+              color: "var(--text-secondary)",
+              textAlign: "left",
+              fontFamily: "monospace",
+              fontSize: "0.85rem",
+              whiteSpace: "pre-wrap",
+              lineHeight: "1.5",
+            }}
+          >
+            {fullContent}
+          </div>
+        );
+      }
       default:
         return (
           <div

@@ -2,10 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildSmartChunks,
+  buildDocumentSummary,
   classifyQueryIntent,
   extractEntities,
   buildEnhancedContext
 } from './documentIntelligence.js';
+import {
+  getFullDocumentContent,
+  normalizeLocalDocument
+} from './documentView.js';
 
 test('buildSmartChunks stores section, page and neighbor metadata', () => {
   const chunks = buildSmartChunks(`[Page 1]
@@ -42,6 +47,40 @@ test('classifyQueryIntent recognizes broad list questions', () => {
   assert.equal(classifyQueryIntent('Согласно моему CV, в каких компаниях я работал?'), 'list_all');
   assert.equal(classifyQueryIntent('Summarize this contract'), 'summarize');
   assert.equal(classifyQueryIntent('Compare these reports'), 'compare');
+});
+
+test('buildDocumentSummary describes markdown content instead of ingestion metadata', () => {
+  const markdown = `# Recall App
+
+Desktop knowledge workspace for importing local documents, extracting text, indexing chunks, and asking questions over the library.
+
+## Features
+
+- Markdown, PDF, text, and image imports
+- Local LanceDB storage
+- Semantic search and contextual chat`;
+  const chunks = buildSmartChunks(markdown, { filename: 'README.md' });
+
+  const summary = buildDocumentSummary('README.md', markdown, chunks);
+
+  assert.doesNotMatch(summary, /Indexed locally|Detected sections/i);
+  assert.match(summary, /Recall App/i);
+  assert.match(summary, /knowledge workspace|importing local documents|semantic search/i);
+});
+
+test('normalizeLocalDocument preserves detail chunks for markdown preview', () => {
+  const normalized = normalizeLocalDocument({
+    id: 'doc-1',
+    filename: 'README.md',
+    file_type: 'markdown',
+    chunks: [
+      { content: '# Title', chunk_index: 0 },
+      { content: 'Body text', chunk_index: 1 }
+    ]
+  });
+
+  assert.equal(normalized.chunks.length, 2);
+  assert.equal(getFullDocumentContent(normalized), '# Title\n\nBody text');
 });
 
 test('buildEnhancedContext expands from semantic hit to neighboring and section chunks', async () => {

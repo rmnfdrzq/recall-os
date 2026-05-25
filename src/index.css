@@ -10,6 +10,9 @@
   --panel-bg-solid: #111622;
   --panel-bg-overlay: rgba(11, 15, 26, 0.75);
   --panel-bg-preview: #111622;
+  --markdown-preview-bg: #000000;
+  --markdown-preview-text: #ffffff;
+  --markdown-preview-muted: #e5e7eb;
   --modal-bg: #111622;
   --surface-subtle: rgba(255, 255, 255, 0.015);
   --surface-muted: rgba(255, 255, 255, 0.03);
@@ -54,6 +57,9 @@ body.light-theme {
   --panel-bg-solid: #ffffff;
   --panel-bg-overlay: rgba(15, 23, 42, 0.25);
   --panel-bg-preview: #f1f5f9;
+  --markdown-preview-bg: #ffffff;
+  --markdown-preview-text: #000000;
+  --markdown-preview-muted: #111827;
   --modal-bg: #ffffff;
   --surface-subtle: rgba(15, 23, 42, 0.025);
   --surface-muted: rgba(15, 23, 42, 0.05);
@@ -255,30 +261,11 @@ body.light-theme .skeleton-glimmer {
 /* Layout definitions */
 .app-grid {
   display: grid;
-  grid-template-columns: 280px 1fr 400px;
+  grid-template-columns: 220px 1fr 320px;
   height: 100vh;
   width: 100vw;
   background: transparent;
   overflow: hidden;
-}
-
-@media (max-width: 1200px) {
-  .app-grid {
-    grid-template-columns: 240px 1fr;
-  }
-  .sidebar-right {
-    position: fixed;
-    right: 0;
-    top: 0;
-    bottom: 0;
-    width: 380px;
-    z-index: 50;
-    transform: translateX(100%);
-    transition: var(--transition-smooth);
-  }
-  .sidebar-right.open {
-    transform: translateX(0);
-  }
 }
 
 @media (max-width: 768px) {

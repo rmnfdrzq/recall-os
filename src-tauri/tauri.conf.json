@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "RecallOS",
-        "width": 1210,
+        "width": 1100,
         "height": 770,
-        "minWidth": 1210,
-        "minHeight": 770,
+        "minWidth": 800,
+        "minHeight": 550,
         "resizable": true,
         "fullscreen": false
       }
