@@ -12,6 +12,7 @@ The server currently provides:
 - chat message persistence in Postgres;
 - assistant message source persistence in Postgres;
 - final prompt construction from user message plus client-supplied `context_chunks`;
+- per-response source-ref assignment and source filtering based on refs cited by the LLM;
 - LLM generation through host Ollama;
 - stateless document fallback processing;
 - stateless document summary generation;
@@ -193,12 +194,40 @@ The server:
 
 1. Saves the user message.
 2. Converts up to 24 client context chunks into prompt context.
-3. Builds a system prompt that asks the LLM to cite document names, sections, and pages when available.
-4. Calls Ollama through `generate_completion`.
-5. Saves the assistant message with a `sources` array.
-6. Returns the serialized assistant message.
+3. Assigns temporary source refs such as `[S1]`, `[S2]`, and stores a source map for the current response only.
+4. Builds a system prompt that asks the LLM to cite only source refs that directly support the answer.
+5. Calls Ollama through `generate_completion`.
+6. Extracts cited source refs from the generated answer.
+7. Strips source-ref markers from the visible assistant text.
+8. Saves the assistant message with a `sources` array filtered to cited refs only.
+9. Returns the serialized assistant message.
 
-The server does not search documents itself in this flow.
+The server does not search documents itself in this flow. Source refs are rebuilt for every new answer, so sources do not accumulate across chat turns.
+
+Example model-facing context format:
+
+```text
+Source Ref: [S1]
+Source Document: notes.md (Section: Overview; Page: 1; Chunk: 0; Type: paragraph; Reason: semantic_rerank)
+Detected Entities: {}
+Content Excerpt:
+...
+---
+```
+
+The LLM may respond internally with text such as:
+
+```text
+The document describes local AI memory. [S1]
+```
+
+The API response stores the clean visible text:
+
+```text
+The document describes local AI memory.
+```
+
+and `sources` contains only the source mapped to `S1`.
 
 ## Chat Persistence
 
@@ -207,7 +236,7 @@ The active Django models are:
 - `ChatSession`
 - `ChatMessage`
 
-`ChatMessage.sources` stores source metadata derived from client-supplied context chunks.
+`ChatMessage.sources` stores source metadata filtered from client-supplied context chunks based on the source refs cited by the model in that specific answer.
 
 ## Model Management Endpoints
 
