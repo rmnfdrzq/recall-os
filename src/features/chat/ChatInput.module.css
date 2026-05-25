@@ -1,0 +1,14 @@
+.wrap {
+  padding: 1rem;
+  border-top: 1px solid var(--panel-border);
+}
+
+.form {
+  display: flex;
+  width: 100%;
+  gap: 0.5rem;
+}
+
+.send {
+  padding: 0.75rem;
+}

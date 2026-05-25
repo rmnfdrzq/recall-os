@@ -1,0 +1,22 @@
+.chip {
+  font-size: 0.65rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 9999px;
+  background: var(--chip-bg);
+  color: var(--text-secondary);
+  border: 1px solid var(--chip-border);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.clickable {
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.clickable:hover {
+  background: rgba(124, 58, 237, 0.15);
+  border-color: rgba(124, 58, 237, 0.3);
+  color: var(--text-primary);
+}

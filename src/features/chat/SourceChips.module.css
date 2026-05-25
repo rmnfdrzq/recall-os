@@ -1,0 +1,48 @@
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.25rem;
+}
+
+.source {
+  position: relative;
+}
+
+.popover {
+  position: absolute;
+  bottom: 1.65rem;
+  left: 0;
+  z-index: 100;
+  width: 280px;
+  padding: 0.85rem;
+  background: var(--panel-bg-solid);
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+  box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+}
+
+.popoverTitle {
+  font-size: 0.75rem;
+  font-weight: 800;
+  margin-bottom: 0.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.summary {
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  line-height: 1.35;
+  margin-bottom: 0.5rem;
+}
+
+.hint {
+  border-top: 1px solid var(--panel-border);
+  padding-top: 0.4rem;
+  margin-top: 0.4rem;
+  font-size: 0.65rem;
+  color: #a78bfa;
+  font-weight: 700;
+}

@@ -1,0 +1,33 @@
+.message {
+  align-self: flex-start;
+  max-width: 85%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.user {
+  align-self: flex-end;
+}
+
+.bubble {
+  padding: 0.85rem 1.1rem;
+  border-radius: 16px 16px 16px 4px;
+  background: var(--surface-muted);
+  border: 1px solid var(--panel-border);
+  color: var(--text-primary);
+}
+
+.user .bubble {
+  border-radius: 16px 16px 4px 16px;
+  background: var(--accent-gradient);
+  border: none;
+  color: #ffffff;
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+
+.content {
+  font-size: 0.88rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}

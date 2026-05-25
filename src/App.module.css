@@ -1,0 +1,15 @@
+.main {
+  margin: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 1.5rem);
+  overflow: hidden;
+}
+
+.contentArea {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}

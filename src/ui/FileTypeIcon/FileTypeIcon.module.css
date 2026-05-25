@@ -1,0 +1,21 @@
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pdf {
+  color: #f87171;
+}
+
+.image {
+  color: #60a5fa;
+}
+
+.markdown {
+  color: #34d399;
+}
+
+.text {
+  color: #9ca3af;
+}

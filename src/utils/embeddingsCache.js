@@ -36,7 +36,7 @@ export async function computeTextHash(text) {
 }
 
 /**
- * Tries to fetch a cached BGE-M3 embedding vector for a given text hash
+ * Tries to fetch a cached server embedding vector for a given text hash.
  * @param {string} hash 
  * @returns {Promise<Array<number>|null>}
  */
@@ -58,7 +58,7 @@ export async function getCachedEmbedding(hash) {
 }
 
 /**
- * Caches a BGE-M3 embedding vector associated with a text hash in IndexedDB
+ * Caches a server embedding vector associated with a text hash in IndexedDB.
  * @param {string} hash 
  * @param {Array<number>} vector 
  * @returns {Promise<boolean>}

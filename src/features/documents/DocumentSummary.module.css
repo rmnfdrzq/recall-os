@@ -1,0 +1,21 @@
+.summary {
+  padding: 1rem;
+  background: rgba(124,58,237,0.03);
+  border: 1px solid rgba(124,58,237,0.1);
+}
+
+.title {
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: #a78bfa;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+.text {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  line-height: 1.45;
+}

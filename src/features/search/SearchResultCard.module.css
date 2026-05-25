@@ -1,0 +1,54 @@
+.card {
+  padding: 1rem;
+  background: var(--surface-subtle);
+  border: 1px solid var(--panel-border);
+  position: relative;
+  cursor: pointer;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 0.5rem;
+  gap: 1rem;
+}
+
+.filename {
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.match {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.2rem;
+  color: #34d399;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.barTrack {
+  width: 60px;
+  height: 4px;
+  background: var(--surface-muted);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.bar {
+  width: var(--match-width);
+  height: 100%;
+  background: linear-gradient(to right, #10b981, #34d399);
+}
+
+.content {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  background: var(--surface-inset);
+  padding: 0.75rem;
+  border-radius: 8px;
+  border-left: 3px solid #7c3aed;
+}
