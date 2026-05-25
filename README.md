@@ -1,44 +1,59 @@
 # RecallOS Client
 
-RecallOS is a client-first personal knowledge workspace. User documents, extracted text, chunks, embeddings, and semantic index data are stored locally in the desktop client. The server is used for chat/session persistence, Ollama-backed generation, and stateless fallback processing for files that cannot be indexed locally.
+RecallOS Client is a Tauri + React desktop app for local document indexing, semantic search, and chat over a personal document library.
+
+The current implementation is a client-first RAG workspace: document metadata, extracted chunks, vectors, and search index data are stored in the desktop app's local LanceDB database. The Django server is still required for chat persistence, Ollama-backed LLM responses, document summary generation, server-side fallback parsing, and BGE-M3 embeddings.
 
 ## Current Architecture
 
 ```text
 Local file
-  -> Tauri/Rust file reader
-  -> client document intelligence pipeline
-  -> local BGE-M3 embeddings
-  -> local LanceDB
-  -> local hybrid retrieval for chat/search
-  -> compact context sent to Django chat endpoint
+  -> Tauri/Rust file picker and file reader
+  -> local parser for text/code/PDF files
+  -> Django fallback parser for images, scanned/failed PDFs, and unsupported local parse cases
+  -> client smart chunking and metadata normalization
+  -> server /api/embeddings/ backed by host Ollama BGE-M3
+  -> local LanceDB document_chunks table
+  -> local vector search
+  -> client context expansion and reranking
+  -> compact context_chunks sent to Django chat endpoint
   -> host Ollama generates answer
 ```
 
-The server does not persist user files or document metadata in the active document flow.
+The active client does not upload files for persistent server storage. Fallback file processing is transient.
+
+## Runtime Requirements
+
+- Tauri desktop runtime.
+- Django backend reachable at `http://127.0.0.1:8000` in desktop/dev mode.
+- Host Ollama reachable by the backend through `OLLAMA_BASE_URL`.
+- An Ollama embedding model compatible with `bge-m3`.
+- An Ollama LLM model configured by the backend, currently defaulting to `gemma4:e2b`.
+
+Browser-only mode is limited. Client-first indexing and semantic search require the desktop app and local LanceDB.
 
 ## Client Responsibilities
 
-- Open files through the native Tauri file dialog.
-- Read local files through Rust commands.
-- Extract local text from supported text/code files and digital PDFs.
-- Split documents into structure-aware chunks.
-- Extract local metadata such as section titles, page numbers, keywords, and lightweight entities.
-- Build BGE-M3 embeddings locally in the WebView.
-- Store document metadata and vector chunks in local LanceDB.
-- Run local semantic search.
-- Build the chat context from local documents before sending a message to the server.
+- Open local files through the native Tauri file dialog.
+- Read local file bytes when server fallback processing is needed.
+- Parse supported local files through Rust commands.
+- Build structure-aware chunks in the client.
+- Add metadata such as section titles, page numbers, keywords, lightweight entities, previous/next chunk links, and content type.
+- Request BGE-M3 embeddings from the backend `/api/embeddings/` endpoint.
+- Cache embeddings in browser IndexedDB by text hash.
+- Store document records and vector chunks in local LanceDB.
+- Run local vector search through Tauri commands.
+- Build compact chat context from local search results before sending a chat message to the server.
+- Display document library, document preview, AI summaries, semantic search results, chat sessions, and source chips.
 
-## Server Responsibilities
+## Server Responsibilities Used by the Client
 
-- Store chat sessions and chat messages.
-- Receive client-supplied context chunks with chat messages.
-- Build the final LLM prompt.
-- Call the host Ollama instance for generation.
-- Return assistant messages and source snippets.
-- Provide `/api/documents/process/` as a stateless fallback for images, scanned PDFs, or files that fail local parsing.
-
-Persistent server-side document upload, document detail, document delete, document summarize, and server-side semantic search are disabled.
+- `POST /api/documents/process/` for transient fallback file processing.
+- `POST /api/documents/summary/` for transient AI summary generation from already extracted text.
+- `POST /api/embeddings/` for stateless BGE-M3 embedding generation through Ollama.
+- `GET/POST /api/chat/session/` for chat sessions.
+- `GET /api/chat/session/<id>/` for session detail and message history.
+- `POST /api/chat/session/<id>/message/` for final prompt construction, Ollama generation, and assistant message persistence.
 
 ## Local Storage
 
@@ -51,9 +66,23 @@ The Tauri client initializes LanceDB under the app data directory:
 It uses two tables:
 
 - `documents`: local document library metadata.
-- `document_chunks`: extracted text chunks, BGE-M3 vectors, and rich retrieval metadata.
+- `document_chunks`: extracted chunk text, vectors, and retrieval metadata.
 
-`document_chunks.metadata` stores JSON containing:
+`documents` stores:
+
+- `id`
+- `filename`
+- `file_type`
+- `status`
+- `summary`
+- `suggested_title`
+- `category`
+- `tags`
+- `file_path`
+- `created_at`
+- `updated_at`
+
+`document_chunks.metadata` stores JSON containing values such as:
 
 - `chunk_index`
 - `prev_chunk_index`
@@ -71,67 +100,94 @@ It uses two tables:
 
 The ingestion flow lives mainly in:
 
-- `src/App.jsx`
+- `src/hooks/useDocumentLibrary.js`
 - `src/utils/documentIntelligence.js`
 - `src/utils/embeddings.js`
+- `src/utils/embeddingsCache.js`
 - `src-tauri/src/parser.rs`
 - `src-tauri/src/db.rs`
 
 Flow:
 
-1. The user selects a file.
-2. Tauri returns the local absolute file path.
+1. The user selects or drops a file.
+2. In desktop mode, Tauri returns a local absolute file path.
 3. The client creates a local `processing` document record.
-4. Rust tries to extract text locally.
-5. The client builds smart chunks with page/section/entity metadata.
-6. The client generates BGE-M3 embeddings for every chunk.
-7. The client stores chunks and vectors in local LanceDB.
-8. The document becomes `processed`.
+4. Rust tries to parse supported local file types.
+5. If local parsing fails, or if the file is an image, the client sends file bytes to the stateless server fallback endpoint.
+6. The client builds or normalizes smart chunks.
+7. The client requests AI summary generation from `/api/documents/summary/`.
+8. The client requests BGE-M3 embeddings from `/api/embeddings/`, using IndexedDB cache hits where available.
+9. The client stores chunks and vectors in local LanceDB.
+10. The document becomes `processed`.
 
-Supported local parsing currently includes:
+Current document statuses include:
 
-- text files
-- markdown
-- common code/config formats
-- CSV/HTML/CSS
-- digital PDFs
+- `processing`
+- `summarizing`
+- `indexed_text`
+- `indexing_vectors`
+- `processed`
+- `failed`
 
-For PDFs, Rust inserts `[Page N]` markers before page text so the JS chunker can preserve page metadata.
+## Supported File Types
 
-## Stateless Server Fallback
+Local Rust parsing currently supports:
 
-Fallback is used when:
+- `.txt`
+- `.md`
+- `.py`
+- `.js`
+- `.ts`
+- `.jsx`
+- `.tsx`
+- `.json`
+- `.csv`
+- `.html`
+- `.css`
+- `.rs`
+- `.go`
+- `.yaml`
+- `.yml`
+- `.ini`
+- `.conf`
+- digital `.pdf`
 
-- the file is an image;
-- local parsing fails;
-- a PDF contains no extractable digital text;
-- local indexing cannot produce usable chunks.
+The native file picker currently exposes:
 
-The client sends the file bytes to:
+- `txt`
+- `md`
+- `pdf`
+- `py`
+- `js`
+- `ts`
+- `json`
+- `rs`
+- `go`
+- `csv`
+- `html`
+- `css`
+- `png`
+- `jpg`
+- `jpeg`
+- `webp`
+
+Server fallback supports text-like files, digital PDFs, and images. Image OCR depends on the backend OCR dependency being installed and working. If OCR is unavailable, the server returns a descriptive fallback string rather than real extracted image text.
+
+DOCX, XLSX, PPTX, RTF, web page capture, email import, and folder ingestion are not implemented in the active client.
+
+## Embeddings
+
+Embeddings are currently generated by the Django server endpoint:
 
 ```text
-POST /api/documents/process/
+POST /api/embeddings/
 ```
 
-The server extracts text/metadata, returns JSON, and does not persist the uploaded file. The client then builds BGE-M3 embeddings and saves the result locally.
+The backend calls host Ollama, preferring `/api/embed` and falling back to `/api/embeddings` when needed. The client names this helper `generateServerEmbeddingsBatch`.
 
-## Local Embeddings
+Vectors are expected to be 1024-dimensional for BGE-M3. The local LanceDB layer pads or truncates vectors to `VECTOR_DIMENSION = 1024`.
 
-Embeddings are generated in:
-
-```text
-src/utils/embeddings.js
-```
-
-The client uses:
-
-```text
-Xenova/bge-m3
-```
-
-via `@huggingface/transformers` with WASM execution. The vector dimension is `1024`, matching `VECTOR_DIMENSION` in `src-tauri/src/db.rs`.
-
-The first run downloads the model files into WebView/browser cache. After that, the app can use the cached model locally.
+The current client does not run `@huggingface/transformers` in the WebView.
 
 ## Smart Chunking
 
@@ -141,72 +197,58 @@ The smart chunker is implemented in:
 src/utils/documentIntelligence.js
 ```
 
-It adds universal structure for large and complex documents:
+It currently:
 
-- detects page markers;
-- detects headings/sections;
-- preserves section titles;
+- detects `[Page N]` markers;
+- detects likely headings and section titles;
+- tracks section indices;
 - creates previous/next chunk links;
-- extracts keywords;
-- extracts lightweight entities such as organizations, dates, emails, money values, and technologies;
-- marks approximate content type such as paragraph/table;
-- builds a local document summary from detected structure.
+- extracts simple keywords;
+- extracts lightweight entities such as organizations, dates, emails, money values, and common technologies;
+- labels approximate content type as `paragraph` or `table`;
+- builds expanded context around semantic hits for chat.
 
-This makes the index more useful than flat text chunking.
+This is stronger than flat text chunking, but it is still heuristic. It is not a full document layout parser.
 
-## Chat Retrieval
+## Search And Chat Retrieval
 
-The chat does not send the whole local library to the server.
+The search bar:
 
-When the user asks a question:
+1. Embeds the query through `/api/embeddings/`.
+2. Calls local LanceDB vector search through `search_local_vectors`.
+3. Displays top matching chunks with document metadata and approximate match percent.
 
-1. The client classifies query intent:
-   - `lookup`
-   - `list_all`
-   - `summarize`
-   - `compare`
-   - `timeline`
-2. The client embeds the question with BGE-M3.
-3. LanceDB returns a broad vector candidate set.
-4. The client reranks candidates using:
-   - semantic score;
-   - keyword overlap;
-   - document title/filename affinity;
-   - section title affinity;
-   - intent-specific boosts.
-5. The client fetches local document detail for top candidate documents.
-6. The client expands context with neighboring chunks.
-7. For broad questions such as “which companies did I work for?” it expands across relevant sections instead of using only the first semantic hit.
-8. The client compresses the selected chunks to a bounded context payload.
-9. The server receives only this compact `context_chunks` array.
+The chat flow:
 
-This gives the LLM enough local document context while keeping files and indexes client-owned.
+1. Classifies query intent as `lookup`, `list_all`, `summarize`, `compare`, or `timeline`.
+2. Embeds the user query through `/api/embeddings/`.
+3. Runs local vector search against LanceDB.
+4. Reranks candidates in JavaScript using semantic distance, keyword overlap, document title affinity, section title affinity, and intent-specific boosts.
+5. Expands context with neighboring chunks.
+6. For broad intents, expands across relevant sections.
+7. Compresses selected chunks to a bounded `context_chunks` payload.
+8. Sends only the selected context chunks to the Django chat endpoint.
 
-## Chat Generation
+The current implementation is vector-first with JavaScript reranking. It does not maintain a separate BM25/full-text index.
 
-The server chat endpoint receives:
+## Sources
 
-```json
-{
-  "content": "question",
-  "context_chunks": []
-}
-```
+The backend stores assistant messages with a `sources` array derived from the client-supplied context chunks. The UI shows source chips under assistant messages. Clicking a source opens the matching document preview when the document exists locally.
 
-The context chunks include:
+Sources currently include document name, suggested title, chunk index, page number, section title, and a short snippet. The UI does not yet jump to or highlight the exact chunk inside the document preview.
 
-- document id
-- filename
-- suggested title
-- chunk index
-- page number
-- section title
-- content type
-- retrieval reason
-- detected entities
-- text content
+## Current Limitations
 
-The Django server inserts this into the system prompt, calls Ollama, stores the chat messages, and returns the assistant response.
+- Embeddings are server/Ollama-backed, not WebView-local.
+- Browser-only mode cannot index documents locally.
+- OCR is best-effort and may return fallback text if EasyOCR is unavailable.
+- There is no DOCX/XLSX/PPTX parser.
+- There is no folder import or web capture.
+- There is no user-editable tag manager.
+- There is no explicit chat scope selector for current document, selected documents, tags, or folders.
+- There is no separate lexical/BM25 search index.
+- There is no full reindex button; summary regeneration exists.
+- Source chips do not yet deep-link to exact chunks in preview.
 
 ## Developer Login
 
@@ -220,11 +262,22 @@ It stores a mock token in `localStorage`. This is not production authentication.
 
 ## Verification Commands
 
-Use the bundled Node runtime if the system Node installation is unavailable:
+From `recall-app`:
 
 ```bash
-/Users/fedorrumiantsev/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --test src/utils/documentIntelligence.test.js
-/Users/fedorrumiantsev/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node node_modules/vite/bin/vite.js build
-/Users/fedorrumiantsev/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node node_modules/eslint/bin/eslint.js src/App.jsx src/utils/embeddings.js src/utils/documentIntelligence.js src/utils/documentIntelligence.test.js
-cd src-tauri && cargo check
+npm run build
+npm run lint
+```
+
+Targeted utility tests can be run with Node:
+
+```bash
+node --test src/utils/documentIntelligence.test.js
+```
+
+For the Tauri Rust layer:
+
+```bash
+cd src-tauri
+cargo check
 ```
