@@ -86,7 +86,7 @@ Categorizes a document based on its text chunks and summary.
     ```
 
 ### 4. Stateless Embeddings Generator
-Generates dense vector embeddings (1024 dimensions) for input text strings using local Ollama.
+Generates dense vector embeddings (1024 dimensions) for input text strings using the Ollama daemon configured for `recall-server`.
 
 *   **Route**: `POST /api/embeddings/`
 *   **Request JSON**:

@@ -1,6 +1,6 @@
 # 🏗️ System Architecture
 
-RecallOS is designed as a **hybrid, local-first AI workspace**. Chunks, embeddings, and vector index databases are stored completely within the client's desktop environment, while persistent chat logs, stateless embedding requests, and primary visual and text LLM inference are handled via the Django backend and Ollama/Groq providers.
+RecallOS is designed as a **hybrid, local-first AI workspace**. Chunks, embeddings, and vector index databases are stored completely within the client's desktop environment, while persistent chat logs, stateless embedding requests, and primary visual and text LLM inference are handled via the Django backend. Ollama is not embedded in the Tauri client; it runs on the server host and is reached by `recall-server`.
 
 ---
 
@@ -29,21 +29,13 @@ RecallOS is designed as a **hybrid, local-first AI workspace**. Chunks, embeddin
        |   Django Server    |-------------->| Local Files |
        |    (recall-server) |               +-------------+
        +----+----------+----+
-            |          |
-            |          | HTTP JSON API calls
-            v          v
-   +------------+  +------------+
-   |  Postgres  |  |   Ollama   |
-   | (Chat Logs)|  | (BGE-M3 &  |
-   +------------+  |  Gemma 4)  |
-                   +------------+
-                        |
-                        | HTTP API call
-                        v
-                   +------------+
-                   |  Groq API  |
-                   | (Llama 4)  |
-                   +------------+
+            |          |                 |
+            v          v                 v
+   +------------+ +------------------+ +------------+
+   |  Postgres  | | Server-Host      | |  Groq API  |
+   | (Chat Logs)| | Ollama           | | (Llama 4)  |
+   +------------+ | (BGE-M3/Gemma 4) | +------------+
+                  +------------------+
 ```
 
 ---
@@ -61,12 +53,12 @@ The frontend runs as a compiled desktop application utilizing Tauri and React. I
 The backend provides a stateless JSON API on port `8000`. Its responsibilities are focused on:
 *   **Chat Persistence**: Stores chat session configurations and individual message contents inside PostgreSQL.
 *   **Stateless Processing Fallbacks**: Receives transient file uploads (images, scanned PDFs) that Rust cannot parse natively. It processes them using visual LLM routes and returns the plain text + layout markers.
-*   **Stateless Inference Routing**: Routes document summary generation, document categorization, and embeddings generation to local Ollama.
-*   **Smart Prompt RAG Inference**: Receives selected context chunks and a user question, compiles a system prompt with citation-assigning references (e.g., `[S1]`, `[S2]`), and calls **Groq** for high-speed generation. If Groq is offline or unavailable, it retries the generation instantly via **local Ollama**.
+*   **Stateless Inference Routing**: Routes embedding generation to the Ollama daemon configured for `recall-server`.
+*   **Smart Prompt RAG Inference**: Receives selected context chunks and a user question, compiles a system prompt with citation-assigning references (e.g., `[S1]`, `[S2]`), and calls **Groq** for high-speed generation. If Groq is offline or unavailable, the server retries the generation instantly via **server-host Ollama**.
 *   **Citation Processing**: Analyzes the generated response, extracts and verifies cited reference markers, maps them back to the source documents, strips them from the client-facing text, and commits the citation mapping to the message model.
 
 ### 3. Model Engine (Ollama & Groq)
-*   **Ollama**: Acts as the local AI provider. It generates text embeddings via `bge-m3` and provides fallback generation using `gemma4:31b-cloud`.
+*   **Ollama**: Acts as the server-side local AI provider. It runs outside the Tauri client, is reached by `recall-server` through `OLLAMA_BASE_URL`, generates text embeddings via `bge-m3`, and provides fallback generation using `gemma4:31b-cloud`.
 *   **Groq API**: Acts as the high-performance primary text and vision LLM engine using the `meta-llama/llama-4-scout-17b-16e-instruct` model.
 
 ---
@@ -84,7 +76,7 @@ User selects local file
   -> Client requests AI summary from POST /api/documents/summary/
   -> Client requests AI category from POST /api/documents/category/
   -> Client queries local IndexedDB for existing chunk hashes
-  -> Client requests missing embeddings from POST /api/embeddings/ (using BGE-M3 via Ollama)
+  -> Client requests missing embeddings from POST /api/embeddings/ (server uses BGE-M3 via Ollama)
   -> Client commits metadata to LanceDB 'documents' table
   -> Client commits vectors & chunks to LanceDB 'document_chunks' table
   -> Document status marked 'processed' in UI
@@ -110,7 +102,7 @@ User inputs message inside active Chat Session
   -> Client compiles top context chunks and POSTs them to POST /api/chat/session/{id}/message/
   -> Server saves user message in PostgreSQL
   -> Server builds prompt, maps sources to [S1], [S2] tags, and requests completion from Groq
-  -> [Groq Fail] Server catches error, retries completion instantly via local Ollama
+  -> [Groq Fail] Server catches error, retries completion instantly via server-host Ollama
   -> Server parses cited tags in response, resolves source documents, and strips tags from final text
   -> Server saves assistant message + sources mapping
   -> Server returns serialized assistant message to client

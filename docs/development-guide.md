@@ -10,7 +10,7 @@ To configure your development environment, ensure you have the following host de
 *   **Node.js**: v18.x or v20.x (Recommended)
 *   **Rust Toolchain**: Stable cargo compiler (Required for Tauri native bindings)
 *   **Docker & Compose**: Running daemon for PostgreSQL containerization
-*   **Ollama Daemon**: Installed and active locally on `http://127.0.0.1:11434`
+*   **Ollama Daemon**: Installed and active on the server host at `http://127.0.0.1:11434`; `recall-server` reaches it through `OLLAMA_BASE_URL`
 
 ---
 
@@ -34,7 +34,7 @@ RecallOS is organized into two main folders: `recall-app` (frontend & desktop ru
     
     # Model Mappings
     GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
-    OLLAMA_BASE_URL=http://host.docker.internal:11434  # Allows Docker container to reach host Ollama
+    OLLAMA_BASE_URL=http://host.docker.internal:11434  # Allows Docker container to reach server-host Ollama
     OLLAMA_EMBEDDING_MODEL=bge-m3
     OLLAMA_LLM_MODEL=gemma4:31b-cloud
     ```

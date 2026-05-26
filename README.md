@@ -10,13 +10,13 @@ RecallOS is a modern, high-performance, local-first AI application designed to i
 |  |    recall-app      |      |   Local Vector Storage  |      | recall-server  |  |
 |  |   (Tauri/React)    |<---->|  (LanceDB / IndexedDB)  |<---->| (Django API)   |  |
 |  +---------+----------+      +-------------------------+      +--------+-------+  |
-|            |                                                           |          |
-+------------|-----------------------------------------------------------|----------+
-             v                                                           v
-   +--------------------+                                      +--------------------+
-   |    Local Models    |                                      |   Cloud Services   |
-   | (Ollama / BGE-M3)  |                                      | (Groq Llama 4 API) |
-   +--------------------+                                      +--------------------+
+|                                                                    |       |      |
++--------------------------------------------------------------------|-------|------+
+                                                                     v       v
+                                                        +----------------+ +--------------------+
+                                                        | Server-Host    | |   Cloud Services   |
+                                                        | Models/Ollama  | | (Groq Llama 4 API) |
+                                                        +----------------+ +--------------------+
 ```
 
 ---
@@ -27,8 +27,8 @@ RecallOS utilizes a **Client-First RAG** architecture, minimizing server load an
 
 *   **Tauri + Rust File Parsing**: Local parsing for code files, text, Markdown, and digital PDFs directly inside the desktop app using fast, native Rust extractors.
 *   **Local LanceDB Vector Database**: Chunks, embeddings, and metadata reside inside the desktop app's directory (`<app_data_dir>/recallos_lancedb`). Vector similarity search runs locally on your machine.
-*   **Server Fallback Ingestion**: Transient fallback parsing for images, scanned PDFs, and visual formats using a Django REST API, which routes files through visual LLM extraction (Groq / local Ollama).
-*   **Groq-First LLM Chat with Local Fallback**: RAG context is queried locally, compressed by the client, and sent to the Django server. The server constructs the final prompt and queries the primary model via Groq, automatically falling back to a local Ollama model if the provider is offline.
+*   **Server Fallback Ingestion**: Transient fallback parsing for images, scanned PDFs, and visual formats using a Django REST API, which routes files through server-side visual LLM extraction (Groq first, then server-host Ollama).
+*   **Groq-First LLM Chat with Server-Side Ollama Fallback**: RAG context is queried locally, compressed by the client, and sent to the Django server. The server constructs the final prompt and queries the primary model via Groq, automatically falling back to the Ollama model reachable from `recall-server` if the provider is offline.
 
 ---
 
@@ -45,7 +45,7 @@ RecallOS is decomposed into two decoupled services under a unified monorepo:
 ### ⚙️ recall-server (Django Backend)
 *   **Frameworks**: Django 5.x, Django REST Framework
 *   **Database**: PostgreSQL (Persists chat session state and message history)
-*   **AI Providers**: Groq API (Primary provider using `llama-4-scout`), Ollama API (Local embeddings with `bge-m3` and LLM fallback using `gemma4:31b-cloud`)
+*   **AI Providers**: Groq API (primary provider using `llama-4-scout`), server-side Ollama API (embeddings with `bge-m3` and LLM fallback using `gemma4:31b-cloud`)
 *   **Extraction Libraries**: `PyPDF2`, `PyMuPDF` (for fallback document layout extraction)
 
 ---
@@ -57,10 +57,10 @@ Ensure you have the following installed on your host system:
 *   [Node.js (v18+)](https://nodejs.org/) & `npm`
 *   [Rust & Cargo](https://www.rust-lang.org/) (for Tauri compiler)
 *   [Docker & Docker Compose](https://www.docker.com/) (for backend services)
-*   [Ollama](https://ollama.com/) (running locally)
+*   [Ollama](https://ollama.com/) running on the server host and reachable by `recall-server` at `OLLAMA_BASE_URL`
 
-### 2. Prepare Local Models
-Start Ollama and run the following commands to pull the necessary models:
+### 2. Prepare Server-Side Ollama Models
+Start Ollama on the server host and run the following commands to pull the models used by `recall-server`:
 ```bash
 # Pull the BGE-M3 embedding model
 ollama pull bge-m3

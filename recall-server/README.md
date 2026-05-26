@@ -1,6 +1,6 @@
 # RecallOS Server
 
-RecallOS Server is the Django backend used by the RecallOS desktop client. It persists chat state, calls Groq as the primary AI provider, falls back to local Ollama for LLM generation when Groq fails, and provides stateless fallback document processing.
+RecallOS Server is the Django backend used by the RecallOS desktop client. It persists chat state, calls Groq as the primary AI provider, falls back to the Ollama daemon reachable from the server for LLM generation when Groq fails, and provides stateless fallback document processing.
 
 The server is not the source of truth for the user's document library. In the active architecture, document metadata, chunks, vectors, and search indexes live in the Tauri client.
 
@@ -13,11 +13,11 @@ The server currently provides:
 - assistant message source persistence in Postgres;
 - final prompt construction from user message plus client-supplied `context_chunks`;
 - per-response source-ref assignment, source filtering based on refs cited by the LLM, and source fallback from supplied context when the LLM omits refs;
-- LLM generation through Groq first, with immediate local Ollama fallback;
+- LLM generation through Groq first, with immediate server-host Ollama fallback;
 - stateless document fallback processing;
 - stateless document summary generation;
 - stateless document category generation;
-- stateless embedding generation through local Ollama `bge-m3`.
+- stateless embedding generation through server-host Ollama `bge-m3`.
 
 ## Non-Responsibilities
 
@@ -66,12 +66,12 @@ OLLAMA_LLM_MODEL=gemma4:31b-cloud
 ```
 
 When running through Docker Compose, `OLLAMA_BASE_URL` is set to
-`http://host.docker.internal:11434` so the container can reach the host Ollama
+`http://host.docker.internal:11434` so the container can reach the server-host Ollama
 daemon.
 
 Groq is the primary provider for text and vision-shaped LLM calls. If a Groq request fails,
-the same request is retried immediately through local Ollama using
-`gemma4:31b-cloud`. Embeddings still use local Ollama `bge-m3`.
+the same request is retried immediately through the Ollama daemon reachable from `recall-server` using
+`gemma4:31b-cloud`. Embeddings still use the server's configured Ollama route with `bge-m3`.
 
 ## Active Endpoints
 
@@ -114,11 +114,11 @@ Supported fallback extraction currently includes:
 - common code/config formats;
 - CSV/HTML/CSS;
 - text and metadata from digital PDFs through `PyPDF2`;
-- rendered PDF pages through the universal Groq model when possible, with Ollama LLM fallback if Groq fails;
-- images/screenshots/scans through the universal Groq model, with Ollama LLM fallback if Groq fails.
+- rendered PDF pages through the universal Groq model when possible, with server-host Ollama LLM fallback if Groq fails;
+- images/screenshots/scans through the universal Groq model, with server-host Ollama LLM fallback if Groq fails.
 
 Text files, Markdown, code, normal chat, RAG chunks, summaries, metadata, categories, images, screenshots, scans, and PDFs use `meta-llama/llama-4-scout-17b-16e-instruct`.
-Groq calls fall back to local Ollama `gemma4:31b-cloud` on provider errors.
+Groq calls fall back to server-host Ollama `gemma4:31b-cloud` on provider errors.
 
 Temporary upload files are deleted after processing.
 
@@ -134,7 +134,7 @@ Temporary upload files are deleted after processing.
 }
 ```
 
-It calls `generate_document_summary`, using Groq first and Ollama fallback if needed, and returns:
+It calls `generate_document_summary`, using Groq first and server-host Ollama fallback if needed, and returns:
 
 ```json
 {
@@ -153,7 +153,7 @@ It calls `generate_document_summary`, using Groq first and Ollama fallback if ne
 }
 ```
 
-It calls `generate_document_category`, using the same Groq-first/Ollama-fallback LLM routing, and returns:
+It calls `generate_document_category`, using the same Groq-first/server-host-Ollama-fallback LLM routing, and returns:
 
 ```json
 {
@@ -182,7 +182,7 @@ It returns:
 }
 ```
 
-The implementation calls local Ollama with `bge-m3`:
+The implementation calls the Ollama daemon configured for `recall-server` with `bge-m3`:
 
 1. First, `/api/embed` for batch embedding.
 2. If needed, `/api/embeddings` one text at a time.
@@ -221,7 +221,7 @@ The server:
 3. Converts up to 10 client context chunks into prompt context, trimming individual excerpts and capping total context around 6500 characters.
 4. Assigns temporary source refs such as `[S1]`, `[S2]`, and stores a source map for the current response only.
 5. Builds a system prompt that asks the LLM to cite only source refs that directly support the answer.
-6. Calls the universal Groq model through `generate_completion`; if Groq fails, `generate_completion` immediately retries through local Ollama `gemma4:31b-cloud`.
+6. Calls the universal Groq model through `generate_completion`; if Groq fails, `generate_completion` immediately retries through server-host Ollama `gemma4:31b-cloud`.
 7. Extracts cited source refs from the generated answer.
 8. Strips source-ref markers from the visible assistant text.
 9. Saves the assistant message with a `sources` array filtered to cited refs. If the model used context but omitted citation markers, the server falls back to the first unique documents from the supplied context, capped at 4 sources.
@@ -267,8 +267,8 @@ The active Django models are:
 
 - `GET /api/models/`
 
-It returns the configured universal Groq model plus the local Ollama LLM fallback model.
-There is no local model pull/delete flow.
+It returns the configured universal Groq model plus the server-side Ollama LLM fallback model.
+There is no API-driven model pull/delete flow.
 
 ## Current Limitations
 
@@ -276,8 +276,8 @@ There is no local model pull/delete flow.
 - No server-side semantic search.
 - No persistent upload storage.
 - PDF rendering requires `PyMuPDF`; if rendering fails, digital text extraction is used as fallback.
-- Embeddings require local Ollama with `bge-m3`; failures degrade to zero vectors instead of failing the request.
-- LLM requests use Groq first and fall back to local Ollama `gemma4:31b-cloud` when Groq is unavailable, rate limited, or returns an error.
+- Embeddings require the server's configured Ollama route with `bge-m3`; failures degrade to zero vectors instead of failing the request.
+- LLM requests use Groq first and fall back to server-host Ollama `gemma4:31b-cloud` when Groq is unavailable, rate limited, or returns an error.
 - Authentication is not enforced; endpoints use `AllowAny`.
 - `GROQ_API_KEY` should be set for primary AI chat, summary, metadata, category, and vision extraction.
 

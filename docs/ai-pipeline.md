@@ -1,6 +1,6 @@
 # 🤖 Local-First AI & RAG Pipeline Specification
 
-RecallOS executes a specialized, local-first RAG (Retrieval-Augmented Generation) pipeline. Dense vector indexes and text chunks are parsed, managed, and searched directly on the client machine inside Tauri, while heavy visual extractions, batch embeddings, and LLM text generation are delegated to backend APIs.
+RecallOS executes a specialized, local-first RAG (Retrieval-Augmented Generation) pipeline. Dense vector indexes and text chunks are parsed, managed, and searched directly on the client machine inside Tauri, while heavy visual extractions, batch embeddings, and LLM text generation are delegated to backend APIs. Ollama fallback runs in the server environment reachable by `recall-server`, not inside the Tauri WebView.
 
 ---
 
@@ -14,7 +14,7 @@ Local Document -> Native Rust Parser -> Text Chunks & Metadata -> AI Summary -> 
 
 ### 1. Document Extraction
 *   **Native Path**: Tauri's Rust parser (`src-tauri/src/parser.rs`) opens supported local file formats (`.pdf`, `.md`, `.txt`, and code files) and extracts text.
-*   **Visual Fallback Path**: If native extraction fails or the file is an image, the client uploads it to the `/api/documents/process/` endpoint. The backend uses the primary visual LLM (`llama-4-scout`) to perform layout OCR and returns extracted text.
+*   **Visual Fallback Path**: If native extraction fails or the file is an image, the client uploads it to the `/api/documents/process/` endpoint. The backend uses the primary visual LLM (`llama-4-scout`) to perform layout OCR and falls back to server-host Ollama if the Groq request fails.
 
 ### 2. Smart Chunking Heuristics
 The text extraction is chunked locally inside `src/utils/documentIntelligence.js`:
@@ -38,7 +38,7 @@ Text Chunk -> Normalized Text -> SHA256 Hash -> IndexedDB Lookup
     Return Cached Vector                                                         POST /api/embeddings/
                                                                                             |
                                                                                             v
-                                                                                   Ollama BGE-M3 (1024d)
+                                                                             Server-Host Ollama BGE-M3 (1024d)
                                                                                             |
                                                                                             v
                                                                                   Cache & Return Vector
@@ -51,7 +51,7 @@ Text Chunk -> Normalized Text -> SHA256 Hash -> IndexedDB Lookup
 ### 2. Double-Caching Architecture
 *   **IndexedDB Cache**: In the client WebView, a Normalized Text Hash Cache (`src/utils/embeddingsCache.js`) checks if a chunk's SHA-256 hash exists in IndexedDB. If found, the vector is returned instantly without hitting the network.
 *   **Batching API**: If a cache miss occurs, the client groups missing chunks and issues a single batch HTTP request to `POST /api/embeddings/`.
-*   **Ollama Fallback**: The Django server routes embedding requests to the local Ollama API. If the call fails, it yields zero vectors (`[0.0, ...]`) to ensure the document indexing finishes gracefully instead of failing the workspace ingestion.
+*   **Ollama Fallback**: The Django server routes embedding requests to the Ollama API configured by `OLLAMA_BASE_URL`. If that server-side call fails, it yields zero vectors (`[0.0, ...]`) to ensure the document indexing finishes gracefully instead of failing the workspace ingestion.
 
 ---
 
@@ -97,7 +97,7 @@ RecallOS utilizes a local LanceDB instance stored inside the user's app data fol
 
 ### 2. Generation & Retry
 *   The prompt instructs the LLM to write a comprehensive answer and cite direct claims *only* using these tags.
-*   The server executes the request via **Groq** (`llama-4-scout`). If the API is rate-limited or errors, it retries the generation instantly through **local Ollama** (`gemma4:31b-cloud`).
+*   The server executes the request via **Groq** (`llama-4-scout`). If the API is rate-limited or errors, `recall-server` retries the generation instantly through **server-host Ollama** (`gemma4:31b-cloud`).
 
 ### 3. Post-Processing & Citation Stripping
 *   The server parses the generated text, searching for `\[S\d+\]` patterns.

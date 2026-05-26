@@ -7,7 +7,7 @@ This directory contains long-term technical documentation and architectural spec
 To understand the system thoroughly, we recommend reviewing the documents in the following order:
 
 1.  📘 **[Architecture](architecture.md)**
-    High-level system topology, components (Tauri client, LanceDB, Django backend, Ollama, Groq), request flows, and security boundaries.
+    High-level system topology, components (Tauri client, LanceDB, Django backend, server-host Ollama, Groq), request flows, and security boundaries.
 2.  📂 **[Project Structure](project-structure.md)**
     Layout of the monorepo codebase (`recall-app` and `recall-server`), subfolders, files, and engineering ownership boundaries.
 3.  📊 **[Data Model](data-model.md)**

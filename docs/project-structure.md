@@ -76,7 +76,7 @@ recall-server/
 ├── ai-services/               # Modular AI client drivers
 │   ├── chunker.py             # Server fallback chunker
 │   ├── ocr_service.py         # Visual parser & EasyOCR fallback
-│   ├── ollama_client.py       # Local Ollama client
+│   ├── ollama_client.py       # Server-side Ollama client
 │   └── groq_client.py         # Cloud Groq model client
 └── backend/                   # Django REST Framework application
     ├── manage.py              # CLI utility
@@ -95,7 +95,7 @@ recall-server/
 
 ### Key Subsystems in `recall-server`
 *   **`ai-services/groq_client.py`**: Interacts with the Groq API. Coordinates high-speed chat generations using visual and text LLMs.
-*   **`ai-services/ollama_client.py`**: Interacts with local Ollama daemon for BGE-M3 embeddings, local summaries, categories, and LLM text generation fallback.
+*   **`ai-services/ollama_client.py`**: Interacts with the Ollama daemon reachable from `recall-server` for BGE-M3 embeddings, summaries, categories, and LLM text generation fallback.
 *   **`backend/core/views.py`**: API views. Handles chat CRUD, `/api/embeddings/`, `/api/documents/process/` transient upload processing, and AI summaries/categories generation.
 *   **`backend/core/models.py`**: Defers RAG file metrics to LanceDB while storing `ChatSession` metadata and the `ChatMessage` collection in PostgreSQL.
 
