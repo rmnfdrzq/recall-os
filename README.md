@@ -21,6 +21,27 @@ RecallOS is a modern, high-performance, local-first AI application designed to i
 
 ---
 
+## 🖼️ Project Demo
+
+RecallOS turns a local document library into a searchable AI workspace: import files, index them locally, search semantically, and ask questions over retrieved context.
+
+### Upload your first document
+Add a local file to the desktop workspace. RecallOS extracts text, builds smart chunks, generates embeddings, and stores the document index in local LanceDB.
+
+![Upload your first document](images/first-doc.jpg)
+
+### Chat with AI about your docs
+Ask natural-language questions about your local library. The client retrieves relevant context locally, then the Django server generates the final answer with Groq and server-side Ollama fallback.
+
+![Chat with AI about your docs](images/ai-chat.jpg)
+
+### Use semantic search across your files
+Search by meaning instead of exact keywords. RecallOS embeds the query, searches local vector chunks, and surfaces the most relevant document passages.
+
+![Use semantic search across your files](images/semantic-search.jpg)
+
+---
+
 ## ⚡ Key Highlights & Architecture
 
 RecallOS utilizes a **Client-First RAG** architecture, minimizing server load and ensuring privacy by keeping your files and vector databases completely local:
