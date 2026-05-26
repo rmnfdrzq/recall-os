@@ -1,0 +1,68 @@
+.message {
+  align-self: flex-start;
+  max-width: 94%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.user {
+  align-self: flex-end;
+}
+
+.bubble {
+  padding: 0.85rem 1.1rem;
+  border-radius: 16px 16px 16px 4px;
+  background: var(--surface-muted);
+  border: 1px solid var(--panel-border);
+  color: var(--text-primary);
+}
+
+.user .bubble {
+  border-radius: 16px 16px 4px 16px;
+  background: var(--accent-gradient);
+  border: none;
+  color: #ffffff;
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+
+.content {
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.content :global(.markdown-p) {
+  margin: 0;
+}
+
+.content :global(.markdown-p + .markdown-p),
+.content :global(.markdown-list + .markdown-p),
+.content :global(.markdown-p + .markdown-list) {
+  margin-top: 0.6rem;
+}
+
+.content :global(strong) {
+  font-weight: 700;
+}
+
+.content :global(.markdown-list) {
+  margin: 0.35rem 0 0;
+  padding-left: 1.15rem;
+}
+
+.content :global(.markdown-inline-code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82em;
+  padding: 0.08rem 0.25rem;
+  border-radius: 4px;
+  background: rgba(148, 163, 184, 0.16);
+}
+
+.content :global(.markdown-code) {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0.5rem 0 0;
+  padding: 0.7rem;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.18);
+}

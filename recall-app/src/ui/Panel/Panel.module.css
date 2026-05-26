@@ -1,0 +1,24 @@
+.panel {
+  background: var(--panel-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--glow-radius);
+  transition: var(--transition-smooth);
+}
+
+.panel:hover {
+  border-color: var(--panel-border-hover);
+}
+
+.heavy {
+  background: var(--panel-bg-heavy);
+}
+
+.solid {
+  background: var(--panel-bg-solid);
+}
+
+.subtle {
+  background: var(--surface-subtle);
+}

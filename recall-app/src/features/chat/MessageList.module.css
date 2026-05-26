@@ -1,0 +1,19 @@
+.list {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scroll-padding-block: 1rem;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.thinking {
+  align-self: flex-start;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}

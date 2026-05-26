@@ -1,0 +1,38 @@
+.stack {
+  display: contents;
+}
+
+.card {
+  min-height: 120px;
+  padding: 1rem;
+  border-radius: 12px;
+  border: 1px solid var(--panel-border);
+  background: var(--surface-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.line {
+  height: 0.75rem;
+  border-radius: 4px;
+}
+
+.title {
+  height: 1.25rem;
+  width: 35%;
+}
+
+.wide {
+  width: 85%;
+}
+
+.medium {
+  width: 65%;
+}
+
+.avatar {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 9999px;
+}

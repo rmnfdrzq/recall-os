@@ -1,0 +1,47 @@
+.summary {
+  padding: 1rem;
+  background: rgba(124,58,237,0.03);
+  border: 1px solid rgba(124,58,237,0.1);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.title {
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: #a78bfa;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.regenerate {
+  flex: 0 0 auto;
+  color: #a78bfa;
+  border: 1px solid rgba(167,139,250,0.18);
+  background: rgba(124,58,237,0.06);
+}
+
+.regenerate:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: rgba(167,139,250,0.32);
+  background: rgba(124,58,237,0.12);
+}
+
+.regenerate:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.text {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  line-height: 1.45;
+}

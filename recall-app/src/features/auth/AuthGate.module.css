@@ -1,0 +1,76 @@
+.screen {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-color);
+  color: var(--text-primary);
+}
+
+.card {
+  width: 100%;
+  max-width: 400px;
+  padding: 2.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.75rem;
+  text-align: center;
+  background: var(--panel-bg-solid);
+  border-radius: 24px;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.logo {
+  background: var(--accent-gradient);
+  color: #ffffff;
+  padding: 1rem;
+  border-radius: 16px;
+  display: flex;
+  box-shadow: 0 10px 20px rgba(124, 58, 237, 0.25);
+}
+
+.title {
+  font-size: 1.75rem;
+  font-weight: 900;
+}
+
+.subtitle,
+.footer {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  text-align: left;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+.footer {
+  border-top: 1px solid var(--panel-border);
+  padding-top: 1rem;
+  width: 100%;
+}

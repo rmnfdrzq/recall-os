@@ -1,0 +1,16 @@
+.badge {
+  font-size: 0.65rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(124,58,237,0.12);
+  color: #a78bfa;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.status {
+  background: var(--badge-bg);
+  color: var(--badge-color);
+}

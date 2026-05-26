@@ -1,0 +1,1 @@
+export { DocumentWorkspace } from "./DocumentWorkspace";

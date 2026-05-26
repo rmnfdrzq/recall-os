@@ -1,0 +1,42 @@
+.dropzone {
+  padding: 1.25rem;
+  border: 1px dashed var(--panel-border);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.5rem;
+  transition: var(--transition-smooth);
+}
+
+.active {
+  border-color: var(--accent-color);
+  background: rgba(124,58,237,0.06);
+}
+
+.input {
+  display: none;
+}
+
+.title {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.hint,
+.uploading {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+.uploading {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.icon {
+  color: #a78bfa;
+}
