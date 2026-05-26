@@ -79,3 +79,55 @@ export const removeMentionQuery = (value = "", mention) => {
   if (!after) return before;
   return `${before} ${after}`;
 };
+
+export const insertDocumentMention = (value = "", mention, document) => {
+  if (!mention || !document) {
+    return {
+      value,
+      cursorIndex: String(value).length
+    };
+  }
+
+  const before = String(value).slice(0, mention.start);
+  const after = String(value).slice(mention.end).replace(/^\s+/, "");
+  const label = getDocumentLabel(document);
+  const mentionText = `@${label}`;
+  const separator = after ? " " : "";
+  const nextValue = `${before}${mentionText}${separator}${after}`;
+
+  return {
+    value: nextValue,
+    cursorIndex: before.length + mentionText.length + separator.length
+  };
+};
+
+export const getDocumentMentionRanges = (value = "", documents = []) => {
+  const source = String(value);
+  if (!source || !documents.length) return [];
+
+  const candidates = documents
+    .flatMap((document) => (
+      Array.from(new Set([getDocumentLabel(document), document?.filename].filter(Boolean)))
+        .map((label) => ({
+          document,
+          text: `@${label}`
+        }))
+    ))
+    .filter((candidate) => candidate.text.length > 1)
+    .sort((a, b) => b.text.length - a.text.length);
+
+  const ranges = [];
+  for (const candidate of candidates) {
+    let start = source.indexOf(candidate.text);
+    while (start !== -1) {
+      const end = start + candidate.text.length;
+      const overlaps = ranges.some((range) => start < range.end && end > range.start);
+      if (!overlaps) {
+        ranges.push({ start, end, document: candidate.document });
+      }
+      start = source.indexOf(candidate.text, end);
+    }
+  }
+
+  return ranges.sort((a, b) => a.start - b.start);
+};

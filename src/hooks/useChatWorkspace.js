@@ -3,8 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { API_BASE } from "../lib/appConfig";
 import { isDesktop } from "../lib/desktop";
 import { generateServerEmbedding } from "../utils/embeddings";
-import { buildEnhancedContext } from "../utils/documentIntelligence";
-import { findReferencedDocuments, getScopedDocuments } from "../utils/chatScope";
+import {
+  buildEnhancedContext,
+  buildLibraryInventoryContext,
+  buildStructuredChatRequest,
+  buildToolResultChatRequest,
+  filterInventoryItemsForToolRequest,
+  routeChatQuery,
+} from "../utils/documentIntelligence";
+import { getScopedDocuments } from "../utils/chatScope";
 
 export function useChatWorkspace({ documents }) {
   const [chatSessions, setChatSessions] = useState([]);
@@ -90,23 +97,31 @@ export function useChatWorkspace({ documents }) {
     setSelectedScopeDocumentIds((prev) => prev.filter((id) => id !== documentId));
   };
 
-  const getLocalChatContext = async (query, scopeDocumentIds = []) => {
-    if (!isDesktop()) return [];
+  const executeLocalToolRequest = async (toolRequest, query) => {
+    if (toolRequest.tool === 'list_library') {
+      const inventoryItems = buildLibraryInventoryContext(documents, { query });
+      return filterInventoryItemsForToolRequest(inventoryItems, toolRequest);
+    }
+
+    if (toolRequest.tool !== 'search_local_documents') {
+      return [];
+    }
+    if (!isDesktop()) {
+      return [];
+    }
     try {
-      const queryVector = await generateServerEmbedding(query);
-      const referencedDocuments = scopeDocumentIds.length > 0 ? [] : findReferencedDocuments(query, documents);
-      const effectiveScopeDocumentIds = scopeDocumentIds.length > 0
-        ? scopeDocumentIds
-        : referencedDocuments.map((document) => document.id);
+      const toolArgs = toolRequest.args || {};
+      const queryVector = await generateServerEmbedding(toolArgs.query || query);
+      const effectiveScopeDocumentIds = toolArgs.document_ids || [];
       const hasExplicitScope = effectiveScopeDocumentIds.length > 0;
       const scopedDocumentIdSet = new Set(effectiveScopeDocumentIds);
       const scopedDocuments = getScopedDocuments(documents, effectiveScopeDocumentIds);
-      const localResults = await invoke("search_local_vectors", { queryVector, limit: hasExplicitScope ? 200 : 50 });
+      const localResults = await invoke("search_local_vectors", { queryVector, limit: toolArgs.limit || (hasExplicitScope ? 200 : 50) });
       const scopedResults = hasExplicitScope
         ? localResults.filter((item) => scopedDocumentIdSet.has(item.document_id))
         : localResults;
       return await buildEnhancedContext({
-        query,
+        query: toolArgs.query || query,
         vectorResults: scopedResults,
         documents: scopedDocuments,
         fetchDocumentDetail: async (documentId) => {
@@ -116,7 +131,7 @@ export function useChatWorkspace({ documents }) {
         maxContextChars: 12000,
       });
     } catch (err) {
-      console.warn("Failed to build local chat context; sending message without document context.", err);
+      console.warn("Failed to execute local chat tool.", err);
       return [];
     }
   };
@@ -152,14 +167,33 @@ export function useChatWorkspace({ documents }) {
         currentSessionId = newSession.id;
       }
 
-      const contextChunks = await getLocalChatContext(userText, scopeDocumentIds);
+      const route = routeChatQuery(userText, { documents, selectedDocumentIds: scopeDocumentIds });
       const res = await fetch(`${API_BASE}/chat/session/${currentSessionId}/message/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: userText, context_chunks: contextChunks }),
+        body: JSON.stringify(buildStructuredChatRequest({
+          content: userText,
+          route,
+        })),
       });
       if (!res.ok) throw new Error("Failed to append chat message");
-      const data = await res.json();
+      let data = await res.json();
+
+      if (data?.type === 'tool_request') {
+        const items = await executeLocalToolRequest(data, userText);
+        const toolRes = await fetch(`${API_BASE}/chat/session/${currentSessionId}/message/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildToolResultChatRequest({
+            content: userText,
+            toolRequest: data,
+            items,
+          })),
+        });
+        if (!toolRes.ok) throw new Error("Failed to append chat tool result");
+        data = await toolRes.json();
+      }
+
       setChatMessages((prev) => [...prev, data]);
     } catch (err) {
       console.error("Error sending message to RecallOS AI:", err);

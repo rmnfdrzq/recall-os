@@ -6,15 +6,6 @@ const STOP_WORDS = new Set([
   'по', 'с', 'со', 'что', 'это', 'я'
 ]);
 
-const LIST_ALL_PATTERNS = [
-  /\b(list|all|every|each|companies|employers|technologies|requirements)\b/i,
-  /(перечисли|все|какие|каких|компани|работал|технологи|требовани)/i
-];
-
-const SUMMARY_PATTERNS = [/\b(summarize|summary|overview)\b/i, /(обобщи|резюмируй|кратко)/i];
-const COMPARE_PATTERNS = [/\b(compare|difference|versus|vs)\b/i, /(сравни|отличи)/i];
-const TIMELINE_PATTERNS = [/\b(timeline|chronology|dates)\b/i, /(когда|хронолог|дат[аы])/i];
-
 export const normalizeText = (value = '') => (
   String(value)
     .toLowerCase()
@@ -30,13 +21,128 @@ export const tokenize = (value = '') => (
     .filter(token => token.length > 2 && !STOP_WORDS.has(token))
 );
 
-export const classifyQueryIntent = (query = '') => {
-  if (COMPARE_PATTERNS.some(pattern => pattern.test(query))) return 'compare';
-  if (TIMELINE_PATTERNS.some(pattern => pattern.test(query))) return 'timeline';
-  if (SUMMARY_PATTERNS.some(pattern => pattern.test(query))) return 'summarize';
-  if (LIST_ALL_PATTERNS.some(pattern => pattern.test(query))) return 'list_all';
-  return 'lookup';
+export const buildLibraryInventoryContext = (documents = [], { query = '' } = {}) => {
+  void query;
+
+  return documents
+    .filter(document => document?.id && document?.filename)
+    .map((document, index) => {
+      const title = document.suggested_title || document.filename;
+      const summary = document.summary || 'No summary available.';
+      const category = document.category || 'Uncategorized';
+      const status = document.status || 'unknown';
+      return {
+        document_id: document.id,
+        filename: document.filename,
+        suggested_title: title,
+        chunk_index: 0,
+        page_number: null,
+        section_title: 'Library Inventory',
+        content_type: 'document_metadata',
+        reason: 'library_inventory',
+        entities: {},
+        content: [
+          `Library item ${index + 1}`,
+          `Filename: ${document.filename}`,
+          `Suggested title: ${title}`,
+          `Category: ${category}`,
+          `Status: ${status}`,
+          `Summary: ${summary}`,
+        ].join('\n')
+      };
+    });
 };
+
+const processedDocuments = (documents = []) => (
+  documents.filter(document => document?.id && document?.filename && document?.status === 'processed')
+);
+
+const documentIds = (documents = []) => documents.map(document => document.id);
+
+export const routeChatQuery = (query = '', {
+  documents = [],
+  selectedDocumentIds = [],
+} = {}) => {
+  void query;
+  const processed = processedDocuments(documents);
+  const selectedSet = new Set(selectedDocumentIds);
+  const selected = selectedDocumentIds.length
+    ? processed.filter(document => selectedSet.has(document.id))
+    : [];
+
+  if (selected.length > 0) {
+    return {
+      query_mode: 'llm_routed',
+      scope: {
+        source: 'explicit_user_scope',
+        document_ids: documentIds(selected),
+        filters: {},
+      },
+      retrieval: { strategy: 'llm_router' },
+    };
+  }
+
+  return {
+    query_mode: 'llm_routed',
+    scope: {
+      source: 'all_documents',
+      document_ids: [],
+      filters: {},
+    },
+    retrieval: { strategy: 'llm_router' },
+  };
+};
+
+export const buildStructuredChatRequest = ({
+  content,
+  route,
+  contextChunks = [],
+  inventoryItems = [],
+}) => {
+  const payload = {
+    content,
+    query_mode: route.query_mode,
+    scope: route.scope,
+    retrieval: route.retrieval,
+  };
+  if (contextChunks.length > 0) payload.context_chunks = contextChunks;
+  if (inventoryItems.length > 0) payload.inventory_items = inventoryItems;
+  return payload;
+};
+
+export const filterInventoryItemsForToolRequest = (items = [], toolRequest = {}) => {
+  const args = toolRequest.args || {};
+  const filters = args.filters || {};
+  const extension = String(filters.extension || '').toLowerCase().replace(/^\./, '').trim();
+  const documentIds = new Set((args.document_ids || []).map(String));
+
+  return items.filter((item) => {
+    const documentId = String(item?.document_id || '');
+    const filename = String(item?.filename || '').toLowerCase();
+    if (documentIds.size > 0 && !documentIds.has(documentId)) return false;
+    if (extension && !filename.endsWith(`.${extension}`)) return false;
+    return true;
+  });
+};
+
+export const buildToolResultChatRequest = ({
+  content,
+  toolRequest,
+  items = [],
+}) => ({
+  content,
+  query_mode: 'tool_result',
+  user_message_id: toolRequest.user_message_id,
+  tool_call_token: toolRequest.tool_call_token,
+  tool_result: {
+    tool_call_id: toolRequest.tool_call_id,
+    tool_call_token: toolRequest.tool_call_token,
+    tool: toolRequest.tool,
+    args: toolRequest.args || {},
+    route: toolRequest.route,
+    items,
+  },
+});
 
 export const extractEntities = (text = '') => {
   const source = String(text);
@@ -244,19 +350,18 @@ const parseMetadata = (metadata) => {
 
 const chunkKey = (chunk) => `${chunk.document_id}:${chunk.chunk_index}`;
 
-const scoreChunk = ({ queryTokens, intent, query, result, metadata, document }) => {
+const scoreChunk = ({ queryTokens, query, result, metadata, document }) => {
   const text = `${result.text || result.content || ''} ${metadata.section_title || ''} ${document?.filename || ''} ${document?.suggested_title || ''}`;
   const tokens = new Set(tokenize(text));
   const keywordHits = queryTokens.filter(token => tokens.has(token)).length;
   const title = normalizeText(`${document?.filename || ''} ${document?.suggested_title || ''}`);
   const asksCv = /\b(cv|resume|резюме)\b/i.test(query);
   const docAffinity = asksCv && /\b(cv|resume|резюме)\b/i.test(title) ? 4 : 0;
-  const listBonus = intent === 'list_all' && /experience|employment|работ|компани|organization/i.test(`${metadata.section_title || ''} ${text}`) ? 2 : 0;
   const semantic = Number.isFinite(result.score) ? Math.max(0, 2 - result.score) : 0;
-  return semantic + keywordHits * 1.5 + docAffinity + listBonus;
+  return semantic + keywordHits * 1.5 + docAffinity;
 };
 
-const normalizeCandidate = (item, documents, queryTokens, intent, query) => {
+const normalizeCandidate = (item, documents, queryTokens, query) => {
   const metadata = parseMetadata(item.metadata);
   const document = documents.find(doc => doc.id === item.document_id);
   const chunkIndex = Number.isFinite(metadata.chunk_index) ? metadata.chunk_index : Number(metadata.chunk_index ?? 0);
@@ -273,7 +378,7 @@ const normalizeCandidate = (item, documents, queryTokens, intent, query) => {
     entities: metadata.entities || {},
     content: item.text || item.content || '',
     metadata,
-    score: scoreChunk({ queryTokens, intent, query, result: item, metadata, document })
+    score: scoreChunk({ queryTokens, query, result: item, metadata, document })
   };
 };
 
@@ -284,10 +389,9 @@ export const buildEnhancedContext = async ({
   fetchDocumentDetail,
   maxContextChars = 12000
 }) => {
-  const intent = classifyQueryIntent(query);
   const queryTokens = tokenize(query);
   const baseCandidates = vectorResults
-    .map(item => normalizeCandidate(item, documents, queryTokens, intent, query))
+    .map(item => normalizeCandidate(item, documents, queryTokens, query))
     .sort((a, b) => b.score - a.score);
 
   const selected = new Map();
@@ -304,7 +408,7 @@ export const buildEnhancedContext = async ({
     addCandidate(candidate, 'semantic_rerank');
   }
 
-  const docIds = Array.from(new Set(baseCandidates.slice(0, intent === 'compare' ? 6 : 3).map(item => item.document_id)));
+  const docIds = Array.from(new Set(baseCandidates.slice(0, 6).map(item => item.document_id)));
   for (const documentId of docIds) {
     const detail = await fetchDocumentDetail(documentId).catch(() => null);
     if (!detail?.chunks?.length) continue;
@@ -332,38 +436,36 @@ export const buildEnhancedContext = async ({
       }
     }
 
-    if (intent === 'list_all' || intent === 'summarize' || intent === 'timeline') {
-      const relevantSectionNames = new Set(docBaseCandidates.map(candidate => normalizeText(candidate.section_title)));
-      const broadChunks = detail.chunks
-        .map(chunk => {
-          const metadata = parseMetadata(chunk.metadata);
-          const section = normalizeText(metadata.section_title || '');
-          const sectionMatch = relevantSectionNames.has(section) || queryTokens.some(token => section.includes(token));
-          const textTokens = new Set(tokenize(chunk.content));
-          const keywordHits = queryTokens.filter(token => textTokens.has(token)).length;
-          return {
-            id: chunk.id,
-            document_id: documentId,
-            filename: document.filename,
-            suggested_title: document.suggested_title || document.filename,
-            chunk_index: chunk.chunk_index,
-            page_number: metadata.page_number || 1,
-            section_title: metadata.section_title || 'Document',
-            content_type: metadata.content_type || 'paragraph',
-            keywords: metadata.keywords || [],
-            entities: metadata.entities || {},
-            content: chunk.content,
-            metadata,
-            score: keywordHits + (sectionMatch ? 3 : 0)
-          };
-        })
-        .filter(chunk => chunk.score > 0 || intent === 'summarize')
-        .sort((a, b) => b.score - a.score || a.chunk_index - b.chunk_index)
-        .slice(0, intent === 'summarize' ? 18 : 28);
+    const relevantSectionNames = new Set(docBaseCandidates.map(candidate => normalizeText(candidate.section_title)));
+    const broadChunks = detail.chunks
+      .map(chunk => {
+        const metadata = parseMetadata(chunk.metadata);
+        const section = normalizeText(metadata.section_title || '');
+        const sectionMatch = relevantSectionNames.has(section) || queryTokens.some(token => section.includes(token));
+        const textTokens = new Set(tokenize(chunk.content));
+        const keywordHits = queryTokens.filter(token => textTokens.has(token)).length;
+        return {
+          id: chunk.id,
+          document_id: documentId,
+          filename: document.filename,
+          suggested_title: document.suggested_title || document.filename,
+          chunk_index: chunk.chunk_index,
+          page_number: metadata.page_number || 1,
+          section_title: metadata.section_title || 'Document',
+          content_type: metadata.content_type || 'paragraph',
+          keywords: metadata.keywords || [],
+          entities: metadata.entities || {},
+          content: chunk.content,
+          metadata,
+          score: keywordHits + (sectionMatch ? 3 : 0)
+        };
+      })
+      .filter(chunk => chunk.score > 0)
+      .sort((a, b) => b.score - a.score || a.chunk_index - b.chunk_index)
+      .slice(0, 28);
 
-      for (const chunk of broadChunks) {
-        addCandidate(chunk, intent === 'summarize' ? 'section_summary_context' : 'list_all_expansion');
-      }
+    for (const chunk of broadChunks) {
+      addCandidate(chunk, 'section_expansion');
     }
   }
 

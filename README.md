@@ -2,7 +2,7 @@
 
 RecallOS Client is a Tauri + React desktop app for local document indexing, semantic search, and chat over a personal document library.
 
-The current implementation is a client-first RAG workspace: document metadata, extracted chunks, vectors, and search index data are stored in the desktop app's local LanceDB database. The Django server is still required for chat persistence, Ollama-backed LLM responses, document summary generation, server-side fallback parsing, and BGE-M3 embeddings.
+The current implementation is a client-first RAG workspace: document metadata, extracted chunks, vectors, and search index data are stored in the desktop app's local LanceDB database. The Django server is still required for chat persistence, Groq-first/Ollama-fallback LLM responses, document summary and category generation, server-side fallback parsing, and BGE-M3 embeddings.
 
 ## Current Architecture
 
@@ -17,7 +17,7 @@ Local file
   -> local vector search
   -> client context expansion and reranking
   -> compact context_chunks sent to Django chat endpoint
-  -> host Ollama generates answer
+  -> Django builds the final prompt and calls Groq first, with local Ollama LLM fallback
 ```
 
 The active client does not upload files for persistent server storage. Fallback file processing is transient.
@@ -28,7 +28,8 @@ The active client does not upload files for persistent server storage. Fallback 
 - Django backend reachable at `http://127.0.0.1:8000` in desktop/dev mode.
 - Host Ollama reachable by the backend through `OLLAMA_BASE_URL`.
 - An Ollama embedding model compatible with `bge-m3`.
-- An Ollama LLM model configured by the backend, currently defaulting to `gemma4:31b-cloud`.
+- Groq API key configured on the backend for primary LLM calls.
+- An Ollama LLM model configured by the backend for fallback, currently defaulting to `gemma4:31b-cloud`.
 
 Browser-only mode is limited. Client-first indexing and semantic search require the desktop app and local LanceDB.
 
@@ -52,6 +53,7 @@ Browser-only mode is limited. Client-first indexing and semantic search require 
 
 - `POST /api/documents/process/` for transient fallback file processing.
 - `POST /api/documents/summary/` for transient AI summary generation from already extracted text.
+- `POST /api/documents/category/` for transient AI category generation from summary/chunks.
 - `POST /api/embeddings/` for stateless BGE-M3 embedding generation through Ollama.
 - `GET/POST /api/chat/session/` for chat sessions.
 - `GET /api/chat/session/<id>/` for session detail and message history.
@@ -120,9 +122,10 @@ Flow:
 5. If local parsing fails, or if the file is an image, the client sends file bytes to the stateless server fallback endpoint.
 6. The client builds or normalizes smart chunks.
 7. The client requests AI summary generation from `/api/documents/summary/`.
-8. The client requests BGE-M3 embeddings from `/api/embeddings/`, using IndexedDB cache hits where available.
-9. The client stores chunks and vectors in local LanceDB.
-10. The document becomes `processed`.
+8. The client requests AI category generation from `/api/documents/category/`.
+9. The client requests BGE-M3 embeddings from `/api/embeddings/`, using IndexedDB cache hits where available.
+10. The client stores chunks and vectors in local LanceDB.
+11. The document becomes `processed`.
 
 Current document statuses include:
 
@@ -175,7 +178,7 @@ The native file picker currently exposes:
 - `jpeg`
 - `webp`
 
-Server fallback supports text-like files, digital PDFs, and images. Image OCR depends on the backend OCR dependency being installed and working. If OCR is unavailable, the server returns a descriptive fallback string rather than real extracted image text.
+Server fallback supports text-like files, digital PDFs, rendered PDF pages, and images. Image/screenshot/scan extraction uses the backend visual LLM route: the universal Groq model first, then local Ollama LLM fallback if Groq fails. There is no EasyOCR dependency in the active server requirements.
 
 DOCX, XLSX, PPTX, RTF, web page capture, email import, and folder ingestion are not implemented in the active client.
 
@@ -243,7 +246,7 @@ The current implementation is vector-first with JavaScript reranking. It does no
 
 ## Sources
 
-The backend assigns each context chunk a temporary source ref such as `[S1]`, asks the LLM to cite only refs that directly support the answer, strips those markers from the visible response, and stores only cited sources in the assistant message `sources` array. This keeps source chips tied to documents actually used for the answer rather than every retrieved chunk.
+The backend assigns each context chunk a temporary source ref such as `[S1]`, asks the LLM to cite only refs that directly support the answer, strips those markers from the visible response, and stores cited sources in the assistant message `sources` array. If the model answers from supplied context but omits source markers, the server falls back to unique context documents so the UI can still show document links.
 
 The UI shows source chips under assistant messages. Clicking a source opens the matching document preview when the document exists locally.
 
@@ -251,7 +254,7 @@ Sources currently include document name, suggested title, source ref, chunk inde
 
 ## Chat Input And Markdown
 
-AI chat supports document mentions through `@`. Typing `@` opens a processed-document suggestion list; typing after `@` filters suggestions by filename and suggested title. Selected documents appear as scope chips for the next question.
+AI chat supports document mentions through `@`. Typing `@` opens a processed-document suggestion list; typing after `@` filters suggestions by filename and suggested title. Selecting a suggestion inserts a highlighted `@Document` mention into the input and adds the document to the scope chips for the next question.
 
 Assistant answers are rendered through the local markdown renderer. Supported formatting includes bold text with `**bold**`, headings, lists, blockquotes, inline code, code blocks, and links.
 
@@ -275,7 +278,7 @@ Invalid stored layout values are ignored and the default layout is used. The def
 
 - Embeddings are server/Ollama-backed, not WebView-local.
 - Browser-only mode cannot index documents locally.
-- OCR is best-effort and may return fallback text if EasyOCR is unavailable.
+- Image/PDF visual extraction depends on the configured visual LLM route. The universal Groq model is primary and local Ollama `gemma4:31b-cloud` is the fallback.
 - There is no DOCX/XLSX/PPTX parser.
 - There is no folder import or web capture.
 - There is no user-editable tag manager.
