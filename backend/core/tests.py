@@ -8,6 +8,14 @@ from rest_framework.test import APITestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 from core.models import ChatSession, ChatMessage
+from core.views import (
+    apply_llm_route_to_inventory,
+    build_agentic_tool_request,
+    build_deterministic_metadata_answer,
+    parse_query_intent_response,
+    parse_structured_llm_response,
+    resolve_answer_sources,
+)
 
 
 AI_SERVICES_DIR = Path(__file__).resolve().parents[2] / "ai-services"
@@ -15,13 +23,13 @@ if str(AI_SERVICES_DIR) not in sys.path:
     sys.path.append(str(AI_SERVICES_DIR))
 
 from groq_client import (
-    GROQ_TEXT_MODEL,
-    GROQ_VISION_MODEL,
+    GROQ_MODEL,
     extract_metadata,
     generate_completion,
     generate_vision_completion,
 )
 from ollama_client import OLLAMA_EMBEDDING_MODEL, generate_embeddings
+from ollama_llm_client import OLLAMA_LLM_MODEL, generate_ollama_llm_completion
 
 
 class RecallOSServerTests(APITestCase):
@@ -158,6 +166,7 @@ class RecallOSServerTests(APITestCase):
         message_url = reverse('chat_message_create', kwargs={"session_id": session_id})
         message_response = self.client.post(message_url, {
             "content": "Where did I work?",
+            "query_mode": "semantic_lookup",
             "context_chunks": [
                 {
                     "document_id": "local-123",
@@ -195,6 +204,7 @@ class RecallOSServerTests(APITestCase):
 
         message_response = self.client.post(reverse('chat_message_create', kwargs={"session_id": session_id}), {
             "content": "What is large_test_text_english.txt about?",
+            "query_mode": "semantic_lookup",
             "context_chunks": [
                 {
                     "document_id": "cv-doc",
@@ -222,6 +232,330 @@ class RecallOSServerTests(APITestCase):
         self.assertEqual(len(message_response.data['sources']), 1)
         self.assertEqual(message_response.data['sources'][0]['document_id'], 'large-text-doc')
 
+    def test_answer_sources_do_not_fallback_to_multiple_uncited_candidates(self):
+        candidate_sources_by_ref = {
+            "S1": {"source_ref": "S1", "document_id": "cv-doc", "filename": "CV.pdf"},
+            "S2": {"source_ref": "S2", "document_id": "readme-doc", "filename": "README.md"},
+        }
+
+        sources = resolve_answer_sources(
+            candidate_sources_by_ref,
+            cited_refs=[],
+            query_mode="semantic_lookup",
+        )
+
+        self.assertEqual(sources, [])
+
+    def test_answer_sources_fallback_to_single_uncited_candidate(self):
+        candidate_sources_by_ref = {
+            "S1": {"source_ref": "S1", "document_id": "story-doc", "filename": "story.txt"},
+        }
+
+        sources = resolve_answer_sources(
+            candidate_sources_by_ref,
+            cited_refs=[],
+            query_mode="semantic_lookup",
+        )
+
+        self.assertEqual([source["document_id"] for source in sources], ["story-doc"])
+
+    def test_answer_sources_include_inventory_candidates_for_metadata_modes(self):
+        candidate_sources_by_ref = {
+            "S1": {"source_ref": "S1", "document_id": "city-doc", "filename": "city_architecture.txt"},
+            "S2": {"source_ref": "S2", "document_id": "large-doc", "filename": "large_test_text_english.txt"},
+        }
+
+        sources = resolve_answer_sources(
+            candidate_sources_by_ref,
+            cited_refs=["S1"],
+            query_mode="extension_filter",
+        )
+
+        self.assertEqual([source["document_id"] for source in sources], ["city-doc", "large-doc"])
+
+    def test_deterministic_metadata_answer_lists_inventory_without_llm(self):
+        candidate_sources_by_ref = {
+            "S1": {
+                "source_ref": "S1",
+                "document_id": "city-doc",
+                "filename": "city_architecture.txt",
+                "suggested_title": "city_architecture.txt",
+            },
+            "S2": {
+                "source_ref": "S2",
+                "document_id": "large-doc",
+                "filename": "large_test_text_english.txt",
+                "suggested_title": "large_test_text_english.txt",
+            },
+        }
+
+        answer = build_deterministic_metadata_answer(
+            query_mode="extension_filter",
+            scope={"filters": {"extension": "txt"}},
+            candidate_sources_by_ref=candidate_sources_by_ref,
+        )
+
+        self.assertIn("Найдено 2 .txt документа", answer)
+        self.assertIn("city_architecture.txt", answer)
+        self.assertIn("large_test_text_english.txt", answer)
+
+    def test_parse_structured_llm_response_reads_answer_and_used_document_ids(self):
+        parsed = parse_structured_llm_response(
+            '{"answer": "Ответ по документу.", "used_document_ids": ["doc-2"], "confidence": "high"}'
+        )
+
+        self.assertEqual(parsed["answer"], "Ответ по документу.")
+        self.assertEqual(parsed["used_document_ids"], ["doc-2"])
+        self.assertEqual(parsed["confidence"], "high")
+
+    def test_parse_structured_llm_response_falls_back_to_legacy_text(self):
+        parsed = parse_structured_llm_response("Legacy answer [S1]")
+
+        self.assertEqual(parsed["answer"], "Legacy answer [S1]")
+        self.assertEqual(parsed["used_document_ids"], [])
+
+    def test_parse_query_intent_response_reads_multilingual_router_json(self):
+        parsed = parse_query_intent_response(
+            '{"query_mode": "extension_filter", "filters": {"extension": "txt"}, '
+            '"document_ids": ["doc-1"], "needs_semantic_context": false, "confidence": "high"}'
+        )
+
+        self.assertEqual(parsed["query_mode"], "extension_filter")
+        self.assertEqual(parsed["scope"]["filters"], {"extension": "txt"})
+        self.assertEqual(parsed["scope"]["document_ids"], ["doc-1"])
+        self.assertEqual(parsed["retrieval"]["strategy"], "metadata_inventory")
+
+    def test_apply_llm_route_to_inventory_filters_extension_after_llm_router(self):
+        route = parse_query_intent_response(
+            '{"query_mode": "extension_filter", "filters": {"extension": "txt"}, '
+            '"needs_semantic_context": false}'
+        )
+        inventory_items = [
+            {"document_id": "doc-1", "filename": "city_architecture.txt", "content": "Filename: city_architecture.txt"},
+            {"document_id": "doc-2", "filename": "README.md", "content": "Filename: README.md"},
+            {"document_id": "doc-3", "filename": "large_test_text_english.txt", "content": "Filename: large_test_text_english.txt"},
+        ]
+
+        filtered_items, resolved_route = apply_llm_route_to_inventory(route, inventory_items)
+
+        self.assertEqual([item["document_id"] for item in filtered_items], ["doc-1", "doc-3"])
+        self.assertEqual(resolved_route["scope"]["document_ids"], ["doc-1", "doc-3"])
+
+    def test_build_agentic_tool_request_asks_client_for_metadata_without_sources(self):
+        route = parse_query_intent_response(
+            '{"query_mode": "extension_filter", "filters": {"extension": "txt"}, '
+            '"needs_semantic_context": false}'
+        )
+
+        tool_request = build_agentic_tool_request(
+            content="какие .txt документы?",
+            route=route,
+            user_message_id=42,
+        )
+
+        self.assertEqual(tool_request["type"], "tool_request")
+        self.assertEqual(tool_request["tool"], "list_library")
+        self.assertEqual(tool_request["args"]["filters"], {"extension": "txt"})
+        self.assertEqual(tool_request["user_message_id"], 42)
+        self.assertIn("tool_call_token", tool_request)
+        self.assertNotIn("items", tool_request)
+
+    def test_build_agentic_tool_request_asks_client_for_semantic_search(self):
+        route = parse_query_intent_response(
+            '{"query_mode": "semantic_lookup", "document_ids": ["doc-1"], '
+            '"needs_semantic_context": true}'
+        )
+
+        tool_request = build_agentic_tool_request(
+            content="что сказано про архитектуру?",
+            route=route,
+            user_message_id=43,
+        )
+
+        self.assertEqual(tool_request["tool"], "search_local_documents")
+        self.assertEqual(tool_request["args"]["query"], "что сказано про архитектуру?")
+        self.assertEqual(tool_request["args"]["document_ids"], ["doc-1"])
+
+    @patch('core.views.generate_completion')
+    def test_chat_message_inventory_context_keeps_all_library_sources(self, mock_completion):
+        mock_completion.return_value = "В библиотеке есть city_architecture.txt [S1], README.md [S3] и CV_Fedor_Rumiantsev.pdf."
+
+        session_response = self.client.post(reverse('chatsession-list'), {
+            "title": "Inventory Sources"
+        }, format='json')
+        session_id = session_response.data['id']
+
+        message_response = self.client.post(reverse('chat_message_create', kwargs={"session_id": session_id}), {
+            "content": "Какие файлы есть у меня в библиотеке?",
+            "query_mode": "library_inventory",
+            "context_chunks": [
+                {
+                    "document_id": "city-doc",
+                    "filename": "city_architecture.txt",
+                    "suggested_title": "city_architecture.txt",
+                    "chunk_index": 0,
+                    "section_title": "Library Inventory",
+                    "reason": "library_inventory",
+                    "content": "Filename: city_architecture.txt\nSummary: City story.",
+                },
+                {
+                    "document_id": "large-doc",
+                    "filename": "large_test_text_english.txt",
+                    "suggested_title": "large_test_text_english.txt",
+                    "chunk_index": 0,
+                    "section_title": "Library Inventory",
+                    "reason": "library_inventory",
+                    "content": "Filename: large_test_text_english.txt\nSummary: Large test text.",
+                },
+                {
+                    "document_id": "readme-doc",
+                    "filename": "README.md",
+                    "suggested_title": "README.md",
+                    "chunk_index": 0,
+                    "section_title": "Library Inventory",
+                    "reason": "library_inventory",
+                    "content": "Filename: README.md\nSummary: Source code examples.",
+                },
+                {
+                    "document_id": "cv-doc",
+                    "filename": "CV_Fedor_Rumiantsev.pdf",
+                    "suggested_title": "Frontend Developer Profile and Experience",
+                    "chunk_index": 0,
+                    "section_title": "Library Inventory",
+                    "reason": "library_inventory",
+                    "content": "Filename: CV_Fedor_Rumiantsev.pdf\nSummary: Frontend Engineer profile.",
+                },
+            ],
+        }, format='json')
+
+        self.assertEqual(message_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(
+            [source['document_id'] for source in message_response.data['sources']],
+            ['city-doc', 'large-doc', 'readme-doc', 'cv-doc'],
+        )
+
+    @patch('core.views.generate_completion')
+    def test_chat_message_uses_structured_inventory_items_contract(self, mock_completion):
+        mock_completion.return_value = (
+            '{"query_mode": "extension_filter", "filters": {"extension": "txt"}, '
+            '"needs_semantic_context": false, "confidence": "high"}'
+        )
+
+        session_response = self.client.post(reverse('chatsession-list'), {
+            "title": "Structured Contract"
+        }, format='json')
+        session_id = session_response.data['id']
+
+        initial_response = self.client.post(reverse('chat_message_create', kwargs={"session_id": session_id}), {
+            "content": "какие из них .txt документы?",
+            "query_mode": "llm_routed",
+            "scope": {
+                "source": "all_documents",
+                "document_ids": [],
+                "filters": {},
+            },
+            "retrieval": {"strategy": "llm_router"},
+        }, format='json')
+
+        self.assertEqual(initial_response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(initial_response.data["type"], "tool_request")
+        self.assertEqual(initial_response.data["tool"], "list_library")
+        self.assertEqual(initial_response.data["args"]["filters"], {"extension": "txt"})
+
+        message_response = self.client.post(reverse('chat_message_create', kwargs={"session_id": session_id}), {
+            "content": "какие из них .txt документы?",
+            "query_mode": "tool_result",
+            "user_message_id": initial_response.data["user_message_id"],
+            "tool_call_token": initial_response.data["tool_call_token"],
+            "tool_result": {
+                "tool_call_id": initial_response.data["tool_call_id"],
+                "tool_call_token": initial_response.data["tool_call_token"],
+                "tool": "list_library",
+                "args": initial_response.data["args"],
+                "route": initial_response.data["route"],
+                "items": [
+                    {
+                        "document_id": "city-doc",
+                        "filename": "city_architecture.txt",
+                        "suggested_title": "city_architecture.txt",
+                        "content": "Filename: city_architecture.txt\nSummary: City story.",
+                    },
+                    {
+                        "document_id": "large-doc",
+                        "filename": "large_test_text_english.txt",
+                        "suggested_title": "large_test_text_english.txt",
+                        "content": "Filename: large_test_text_english.txt\nSummary: Large text.",
+                    },
+                    {
+                        "document_id": "cv-doc",
+                        "filename": "CV_Fedor_Rumiantsev.pdf",
+                        "suggested_title": "Frontend Developer Profile and Experience",
+                        "content": "Filename: CV_Fedor_Rumiantsev.pdf\nSummary: CV.",
+                    },
+                ],
+            },
+        }, format='json')
+
+        self.assertEqual(message_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(mock_completion.call_count, 1)
+        self.assertIn("Найдено 2 .txt документа", message_response.data["content"])
+        self.assertEqual(
+            [source['document_id'] for source in message_response.data['sources']],
+            ['city-doc', 'large-doc'],
+        )
+
+    @patch('core.views.generate_completion')
+    def test_chat_message_sources_fallback_to_context_when_model_omits_citations(self, mock_completion):
+        mock_completion.return_value = "The story is about restoring an old factory for the community."
+
+        session_response = self.client.post(reverse('chatsession-list'), {
+            "title": "Citation Fallback"
+        }, format='json')
+        session_id = session_response.data['id']
+
+        message_response = self.client.post(reverse('chat_message_create', kwargs={"session_id": session_id}), {
+            "content": "What is this document about?",
+            "query_mode": "semantic_lookup",
+            "context_chunks": [{
+                "document_id": "story-doc",
+                "filename": "factory_story.txt",
+                "suggested_title": "Factory Story",
+                "chunk_index": 0,
+                "section_title": "Document",
+                "content": "Mara wants to turn the old factory into a public community space.",
+            }],
+        }, format='json')
+
+        self.assertEqual(message_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(message_response.data['sources'][0]['document_id'], 'story-doc')
+
+    @patch('core.views.generate_completion')
+    def test_chat_message_returns_assistant_fallback_when_groq_temporarily_fails(self, mock_completion):
+        mock_completion.side_effect = RuntimeError("Groq API error (429): rate_limit_exceeded")
+
+        session_response = self.client.post(reverse('chatsession-list'), {
+            "title": "Provider Failure"
+        }, format='json')
+        session_id = session_response.data['id']
+
+        message_response = self.client.post(reverse('chat_message_create', kwargs={"session_id": session_id}), {
+            "content": "How did the story end?",
+            "query_mode": "semantic_lookup",
+            "context_chunks": [{
+                "document_id": "story-doc",
+                "filename": "factory_story.txt",
+                "suggested_title": "Factory Story",
+                "chunk_index": 1,
+                "section_title": "Ending",
+                "content": "The team reopened the factory as a useful public place.",
+            }],
+        }, format='json')
+
+        self.assertEqual(message_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(message_response.data['role'], 'assistant')
+        self.assertIn('could not generate', message_response.data['content'])
+        self.assertEqual(message_response.data['sources'][0]['document_id'], 'story-doc')
+
     @patch('core.views.generate_completion')
     def test_chat_message_sources_do_not_accumulate_between_answers(self, mock_completion):
         mock_completion.side_effect = [
@@ -237,6 +571,7 @@ class RecallOSServerTests(APITestCase):
 
         first_response = self.client.post(message_url, {
             "content": "What is in the CV?",
+            "query_mode": "semantic_lookup",
             "context_chunks": [{
                 "document_id": "cv-doc",
                 "filename": "CV_Fedor_Rumiantsev.pdf",
@@ -250,6 +585,7 @@ class RecallOSServerTests(APITestCase):
 
         second_response = self.client.post(message_url, {
             "content": "What is in the large text file?",
+            "query_mode": "semantic_lookup",
             "context_chunks": [{
                 "document_id": "large-text-doc",
                 "filename": "large_test_text_english.txt",
@@ -266,21 +602,22 @@ class RecallOSServerTests(APITestCase):
         self.assertEqual(first_response.data['sources'][0]['document_id'], 'cv-doc')
         self.assertEqual(second_response.data['sources'][0]['document_id'], 'large-text-doc')
 
-    def test_model_list_reports_groq_text_and_vision_models(self):
+    def test_model_list_reports_single_universal_groq_model(self):
         response = self.client.get(reverse('models_list'))
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['provider'], 'groq')
+        self.assertEqual(response.data['fallback_provider'], 'ollama')
+        self.assertEqual(response.data['fallback_model'], OLLAMA_LLM_MODEL)
         models = response.data['models']
-        names = [model['name'] for model in models]
-        profiles = {model['name']: model['profile'] for model in models}
-        self.assertEqual(names, [GROQ_TEXT_MODEL, GROQ_VISION_MODEL])
-        self.assertEqual(profiles[GROQ_TEXT_MODEL], 'text')
-        self.assertEqual(profiles[GROQ_VISION_MODEL], 'vision')
+        self.assertEqual(len(models), 1)
+        self.assertEqual(models[0]['name'], GROQ_MODEL)
+        self.assertEqual(models[0]['profile'], 'universal')
+        self.assertTrue(models[0]['is_default'])
 
     @patch.dict('os.environ', {'GROQ_API_KEY': 'test-key'})
     @patch('groq_client.requests.post')
-    def test_groq_text_completion_uses_default_text_model(self, mock_post):
+    def test_groq_text_completion_uses_universal_model(self, mock_post):
         mock_post.return_value.status_code = status.HTTP_200_OK
         mock_post.return_value.json.return_value = {
             "choices": [{"message": {"content": "text response"}}]
@@ -290,13 +627,46 @@ class RecallOSServerTests(APITestCase):
 
         self.assertEqual(response, "text response")
         payload = mock_post.call_args.kwargs['json']
-        self.assertEqual(payload['model'], GROQ_TEXT_MODEL)
+        self.assertEqual(payload['model'], GROQ_MODEL)
         self.assertEqual(payload['messages'][0]['role'], 'system')
         self.assertEqual(payload['messages'][1]['content'], 'Hello')
 
     @patch.dict('os.environ', {'GROQ_API_KEY': 'test-key'})
+    @patch('groq_client.generate_ollama_llm_completion')
     @patch('groq_client.requests.post')
-    def test_groq_vision_completion_uses_vision_model_for_images(self, mock_post):
+    def test_groq_text_completion_falls_back_to_ollama_llm_on_error(self, mock_post, mock_ollama_completion):
+        mock_post.return_value.status_code = status.HTTP_429_TOO_MANY_REQUESTS
+        mock_post.return_value.json.return_value = {
+            "error": {"message": "rate limit", "code": "rate_limit_exceeded"}
+        }
+        mock_ollama_completion.return_value = "ollama fallback response"
+
+        response = generate_completion("Hello", system_prompt="System")
+
+        self.assertEqual(response, "ollama fallback response")
+        mock_ollama_completion.assert_called_once()
+        fallback_messages = mock_ollama_completion.call_args.args[0]
+        self.assertEqual(fallback_messages[0]['role'], 'system')
+        self.assertEqual(fallback_messages[1]['content'], 'Hello')
+
+    @patch.dict('os.environ', {'GROQ_API_KEY': 'test-key'})
+    @patch('groq_client.generate_ollama_llm_completion')
+    @patch('groq_client.requests.post')
+    def test_groq_vision_completion_falls_back_to_ollama_llm_on_error(self, mock_post, mock_ollama_completion):
+        mock_post.return_value.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        mock_post.return_value.text = "provider error"
+        mock_ollama_completion.return_value = "ollama vision fallback response"
+
+        response = generate_vision_completion("Extract text", ["data:image/png;base64,abc"])
+
+        self.assertEqual(response, "ollama vision fallback response")
+        fallback_messages = mock_ollama_completion.call_args.args[0]
+        self.assertEqual(fallback_messages[-1]['content'][0]['text'], 'Extract text')
+        self.assertEqual(fallback_messages[-1]['content'][1]['type'], 'image_url')
+
+    @patch.dict('os.environ', {'GROQ_API_KEY': 'test-key'})
+    @patch('groq_client.requests.post')
+    def test_groq_vision_completion_uses_universal_model_for_images(self, mock_post):
         mock_post.return_value.status_code = status.HTTP_200_OK
         mock_post.return_value.json.return_value = {
             "choices": [{"message": {"content": "vision response"}}]
@@ -306,10 +676,28 @@ class RecallOSServerTests(APITestCase):
 
         self.assertEqual(response, "vision response")
         payload = mock_post.call_args.kwargs['json']
-        self.assertEqual(payload['model'], GROQ_VISION_MODEL)
+        self.assertEqual(payload['model'], GROQ_MODEL)
         content = payload['messages'][0]['content']
         self.assertEqual(content[0]['type'], 'text')
         self.assertEqual(content[1]['type'], 'image_url')
+
+    @patch('ollama_llm_client.requests.post')
+    def test_ollama_llm_completion_uses_gemma_cloud_chat_endpoint(self, mock_post):
+        mock_post.return_value.status_code = status.HTTP_200_OK
+        mock_post.return_value.json.return_value = {
+            "message": {"content": "ollama response"}
+        }
+
+        response = generate_ollama_llm_completion([
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "Hello"},
+        ])
+
+        self.assertEqual(response, "ollama response")
+        self.assertIn('/api/chat', mock_post.call_args.args[0])
+        payload = mock_post.call_args.kwargs['json']
+        self.assertEqual(payload['model'], OLLAMA_LLM_MODEL)
+        self.assertEqual(payload['messages'][1]['content'], 'Hello')
 
     @patch('ollama_client.get_fallback_model')
     @patch('ollama_client.requests.post')

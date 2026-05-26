@@ -109,8 +109,8 @@ REST_FRAMEWORK = {
 
 # AI Custom System Configs
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
-GROQ_TEXT_MODEL = os.environ.get('GROQ_TEXT_MODEL', 'llama-3.1-8b-instant')
-GROQ_VISION_MODEL = os.environ.get('GROQ_VISION_MODEL', 'meta-llama/llama-4-scout-17b-16e-instruct')
+GROQ_MODEL = os.environ.get('GROQ_MODEL', 'meta-llama/llama-4-scout-17b-16e-instruct')
 OLLAMA_BASE_URL = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
 OLLAMA_EMBEDDING_MODEL = os.environ.get('OLLAMA_EMBEDDING_MODEL', 'bge-m3')
+OLLAMA_LLM_MODEL = os.environ.get('OLLAMA_LLM_MODEL', 'gemma4:31b-cloud')
 OCR_ENGINE = os.environ.get('OCR_ENGINE', 'easyocr')

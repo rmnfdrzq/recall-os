@@ -1,6 +1,6 @@
 # RecallOS Server
 
-RecallOS Server is the Django/Groq backend used by the RecallOS desktop client. It persists chat state, calls Groq for AI generation, and provides stateless fallback document processing.
+RecallOS Server is the Django backend used by the RecallOS desktop client. It persists chat state, calls Groq as the primary AI provider, falls back to local Ollama for LLM generation when Groq fails, and provides stateless fallback document processing.
 
 The server is not the source of truth for the user's document library. In the active architecture, document metadata, chunks, vectors, and search indexes live in the Tauri client.
 
@@ -12,10 +12,11 @@ The server currently provides:
 - chat message persistence in Postgres;
 - assistant message source persistence in Postgres;
 - final prompt construction from user message plus client-supplied `context_chunks`;
-- per-response source-ref assignment and source filtering based on refs cited by the LLM;
-- LLM generation through Groq;
+- per-response source-ref assignment, source filtering based on refs cited by the LLM, and source fallback from supplied context when the LLM omits refs;
+- LLM generation through Groq first, with immediate local Ollama fallback;
 - stateless document fallback processing;
 - stateless document summary generation;
+- stateless document category generation;
 - stateless embedding generation through local Ollama `bge-m3`.
 
 ## Non-Responsibilities
@@ -38,7 +39,7 @@ The backend uses:
 - Django;
 - Django REST Framework;
 - PostgreSQL via `psycopg2-binary`;
-- `requests` for Groq API calls;
+- `requests` for Groq and Ollama API calls;
 - `PyPDF2` and `PyMuPDF` for PDF extraction/rendering;
 - Pillow;
 
@@ -49,7 +50,7 @@ The backend uses:
 - `web`: the Django API on port `8000`;
 - `db`: PostgreSQL 16 on port `5432`.
 
-Groq is configured through `.env`:
+AI providers are configured through `.env`:
 
 ```text
 GROQ_API_KEY=...
@@ -58,15 +59,26 @@ GROQ_API_KEY=...
 Model routing is fixed and explicit:
 
 ```text
-GROQ_TEXT_MODEL=llama-3.1-8b-instant
-GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_EMBEDDING_MODEL=bge-m3
+OLLAMA_LLM_MODEL=gemma4:31b-cloud
 ```
+
+When running through Docker Compose, `OLLAMA_BASE_URL` is set to
+`http://host.docker.internal:11434` so the container can reach the host Ollama
+daemon.
+
+Groq is the primary provider for text and vision-shaped LLM calls. If a Groq request fails,
+the same request is retried immediately through local Ollama using
+`gemma4:31b-cloud`. Embeddings still use local Ollama `bge-m3`.
 
 ## Active Endpoints
 
 ```text
 POST     /api/documents/process/
 POST     /api/documents/summary/
+POST     /api/documents/category/
 POST     /api/embeddings/
 GET/POST /api/chat/session/
 GET      /api/chat/session/<id>/
@@ -102,25 +114,27 @@ Supported fallback extraction currently includes:
 - common code/config formats;
 - CSV/HTML/CSS;
 - text and metadata from digital PDFs through `PyPDF2`;
-- rendered PDF pages through the Groq vision model when possible;
-- images/screenshots/scans through the Groq vision model.
+- rendered PDF pages through the universal Groq model when possible, with Ollama LLM fallback if Groq fails;
+- images/screenshots/scans through the universal Groq model, with Ollama LLM fallback if Groq fails.
 
-Text files, Markdown, code, normal chat, RAG chunks, summaries, metadata, and categories use `llama-3.1-8b-instant`. Images, screenshots, scans, and PDFs use `meta-llama/llama-4-scout-17b-16e-instruct`.
+Text files, Markdown, code, normal chat, RAG chunks, summaries, metadata, categories, images, screenshots, scans, and PDFs use `meta-llama/llama-4-scout-17b-16e-instruct`.
+Groq calls fall back to local Ollama `gemma4:31b-cloud` on provider errors.
 
 Temporary upload files are deleted after processing.
 
-## Stateless Summary Generation
+## Stateless Summary And Category Generation
 
 `POST /api/documents/summary/` accepts already extracted document text:
 
 ```json
 {
   "filename": "document.txt",
-  "text": "..."
+  "text": "...",
+  "model_profile": "text"
 }
 ```
 
-It calls Groq through `generate_document_summary` and returns:
+It calls `generate_document_summary`, using Groq first and Ollama fallback if needed, and returns:
 
 ```json
 {
@@ -128,7 +142,26 @@ It calls Groq through `generate_document_summary` and returns:
 }
 ```
 
-The endpoint persists nothing.
+`POST /api/documents/category/` accepts already extracted chunks plus an optional summary:
+
+```json
+{
+  "filename": "document.txt",
+  "summary": "...",
+  "chunks": [{ "content": "..." }],
+  "model_profile": "text"
+}
+```
+
+It calls `generate_document_category`, using the same Groq-first/Ollama-fallback LLM routing, and returns:
+
+```json
+{
+  "category": "General"
+}
+```
+
+Both endpoints persist nothing. `model_profile` is `text` for normal text/code/Markdown documents and `vision` for images and PDFs.
 
 ## Stateless Embeddings
 
@@ -184,14 +217,15 @@ The chat message endpoint expects the client to send local retrieval output as `
 The server:
 
 1. Saves the user message.
-2. Converts up to 24 client context chunks into prompt context.
-3. Assigns temporary source refs such as `[S1]`, `[S2]`, and stores a source map for the current response only.
-4. Builds a system prompt that asks the LLM to cite only source refs that directly support the answer.
-5. Calls Groq text model through `generate_completion`.
-6. Extracts cited source refs from the generated answer.
-7. Strips source-ref markers from the visible assistant text.
-8. Saves the assistant message with a `sources` array filtered to cited refs only.
-9. Returns the serialized assistant message.
+2. Adds the recent chat history to the model prompt so follow-up questions can resolve pronouns and previous context.
+3. Converts up to 10 client context chunks into prompt context, trimming individual excerpts and capping total context around 6500 characters.
+4. Assigns temporary source refs such as `[S1]`, `[S2]`, and stores a source map for the current response only.
+5. Builds a system prompt that asks the LLM to cite only source refs that directly support the answer.
+6. Calls the universal Groq model through `generate_completion`; if Groq fails, `generate_completion` immediately retries through local Ollama `gemma4:31b-cloud`.
+7. Extracts cited source refs from the generated answer.
+8. Strips source-ref markers from the visible assistant text.
+9. Saves the assistant message with a `sources` array filtered to cited refs. If the model used context but omitted citation markers, the server falls back to the first unique documents from the supplied context, capped at 4 sources.
+10. Returns the serialized assistant message.
 
 The server does not search documents itself in this flow. Source refs are rebuilt for every new answer, so sources do not accumulate across chat turns.
 
@@ -218,7 +252,7 @@ The API response stores the clean visible text:
 The document describes local AI memory.
 ```
 
-and `sources` contains only the source mapped to `S1`.
+and `sources` contains the source mapped to `S1`. If the answer omitted `[S1]` while context chunks were supplied, `sources` falls back to the relevant context documents so the client can still show document links.
 
 ## Chat Persistence
 
@@ -227,13 +261,14 @@ The active Django models are:
 - `ChatSession`
 - `ChatMessage`
 
-`ChatMessage.sources` stores source metadata filtered from client-supplied context chunks based on the source refs cited by the model in that specific answer.
+`ChatMessage.sources` stores source metadata derived from client-supplied context chunks. It prefers source refs cited by the model in that specific answer and falls back to unique context documents when citations are omitted.
 
 ## Model Endpoint
 
 - `GET /api/models/`
 
-It returns the configured Groq text and vision model profiles. There is no local model pull/delete flow.
+It returns the configured universal Groq model plus the local Ollama LLM fallback model.
+There is no local model pull/delete flow.
 
 ## Current Limitations
 
@@ -242,8 +277,9 @@ It returns the configured Groq text and vision model profiles. There is no local
 - No persistent upload storage.
 - PDF rendering requires `PyMuPDF`; if rendering fails, digital text extraction is used as fallback.
 - Embeddings require local Ollama with `bge-m3`; failures degrade to zero vectors instead of failing the request.
+- LLM requests use Groq first and fall back to local Ollama `gemma4:31b-cloud` when Groq is unavailable, rate limited, or returns an error.
 - Authentication is not enforced; endpoints use `AllowAny`.
-- `GROQ_API_KEY` must be set for AI chat, summary, metadata, category, and vision extraction.
+- `GROQ_API_KEY` should be set for primary AI chat, summary, metadata, category, and vision extraction.
 
 ## Verification
 

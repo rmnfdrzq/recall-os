@@ -7,6 +7,8 @@ import re
 
 import requests
 
+from ollama_llm_client import generate_ollama_llm_completion
+
 try:
     from dotenv import load_dotenv
     load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
@@ -16,11 +18,10 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_TEXT_MODEL = "llama-3.1-8b-instant"
-GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 TEXT_MODEL_PROFILE = "text"
 VISION_MODEL_PROFILE = "vision"
-SUPPORTED_GROQ_MODEL_NAMES = [GROQ_TEXT_MODEL, GROQ_VISION_MODEL]
+SUPPORTED_GROQ_MODEL_NAMES = [GROQ_MODEL]
 
 
 def _get_groq_api_key():
@@ -30,9 +31,7 @@ def _get_groq_api_key():
 def _select_model(model_profile=TEXT_MODEL_PROFILE, model=None):
     if model in SUPPORTED_GROQ_MODEL_NAMES:
         return model
-    if model_profile == VISION_MODEL_PROFILE:
-        return os.environ.get("GROQ_VISION_MODEL", GROQ_VISION_MODEL)
-    return os.environ.get("GROQ_TEXT_MODEL", GROQ_TEXT_MODEL)
+    return os.environ.get("GROQ_MODEL", GROQ_MODEL)
 
 
 def _groq_headers():
@@ -53,22 +52,33 @@ def _call_groq(messages, *, model_profile=TEXT_MODEL_PROFILE, model=None, temper
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
-    response = requests.post(GROQ_API_URL, headers=_groq_headers(), json=payload, timeout=120)
-    if response.status_code >= 400:
-        try:
-            details = response.json()
-        except Exception:
-            details = response.text
-        raise RuntimeError(f"Groq API error ({response.status_code}) for {selected_model}: {details}")
+    try:
+        response = requests.post(GROQ_API_URL, headers=_groq_headers(), json=payload, timeout=120)
+        if response.status_code >= 400:
+            try:
+                details = response.json()
+            except Exception:
+                details = response.text
+            raise RuntimeError(f"Groq API error ({response.status_code}) for {selected_model}: {details}")
 
-    data = response.json()
-    return data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+        data = response.json()
+        return data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+    except Exception as exc:
+        logger.warning(
+            "Groq request failed for %s; falling back to local Ollama LLM: %s",
+            selected_model,
+            exc,
+        )
+        return generate_ollama_llm_completion(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
 
 def generate_completion(prompt, system_prompt=None, stream=False, model=None, model_profile=TEXT_MODEL_PROFILE):
     """
-    Generates a text response through Groq. The default profile is text and uses
-    llama-3.1-8b-instant for ordinary chat, RAG chunks, summaries, and metadata.
+    Generates a text response through the universal Groq model.
     """
     if stream:
         raise NotImplementedError("Streaming Groq responses are not implemented for this API surface")
@@ -88,7 +98,7 @@ def bytes_to_data_url(data, filename=None, mime_type=None):
 
 def generate_vision_completion(prompt, image_data_urls, system_prompt=None):
     """
-    Uses Groq's vision model for images, scans, screenshots, and rendered PDF pages.
+    Uses the universal Groq model for images, scans, screenshots, and rendered PDF pages.
     """
     if not image_data_urls:
         raise ValueError("At least one image is required for vision completion")
