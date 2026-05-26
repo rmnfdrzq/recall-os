@@ -265,7 +265,7 @@ def normalize_inventory_items(items):
 
 def apply_llm_route_to_inventory(route, inventory_items):
     scope = route.get("scope") if isinstance(route, dict) else {}
-    filters = scope.get("filters") if isinstance(scope, dict) else {}
+    filters = scope.get("filters") if isinstance(scope, dict) and isinstance(scope.get("filters"), dict) else {}
     document_ids = scope.get("document_ids") if isinstance(scope, dict) else []
     wanted_document_ids = {str(document_id) for document_id in document_ids or [] if document_id}
     extension = str(filters.get("extension") or "").lower().lstrip(".").strip()
@@ -378,7 +378,7 @@ def build_agentic_tool_request(content, route, user_message_id, session_id=None)
         "tool_call_id": tool_call_id,
         "tool": tool,
         "user_message_id": user_message_id,
-        "session_id": session_id,
+        "session_id": str(session_id) if session_id is not None else None,
     }
 
     return {
@@ -448,20 +448,40 @@ def source_display_name(source):
     return filename
 
 
-def build_deterministic_metadata_answer(query_mode, scope, candidate_sources_by_ref):
+def detect_user_language(text):
+    source = str(text or "")
+    cyrillic_count = len(re.findall(r'[А-Яа-яЁё]', source))
+    latin_count = len(re.findall(r'[A-Za-z]', source))
+    return "ru" if cyrillic_count > latin_count else "en"
+
+
+def build_deterministic_metadata_answer(query_mode, scope, candidate_sources_by_ref, user_language="ru"):
     sources = unique_sources_from_candidates(candidate_sources_by_ref, limit=50)
     filters = scope.get("filters") if isinstance(scope, dict) else {}
     extension = filters.get("extension") if isinstance(filters, dict) else None
+    is_english = user_language == "en"
 
     if not sources:
         if extension:
+            if is_english:
+                return f"No .{extension} documents were found in the library."
             return f"В библиотеке не найдено документов с расширением .{extension}."
+        if is_english:
+            return "No documents were found in the library."
         return "В библиотеке не найдено документов."
 
-    if query_mode == "extension_filter" and extension:
-        header = f"Найдено {len(sources)} .{extension} документа:"
+    count = len(sources)
+    if is_english:
+        noun = "document" if count == 1 else "documents"
+        if query_mode == "extension_filter" and extension:
+            header = f"Found {count} .{extension} {noun}:"
+        else:
+            header = f"Found {count} {noun} in the library:"
     else:
-        header = f"В библиотеке найдено {len(sources)} документов:"
+        if query_mode == "extension_filter" and extension:
+            header = f"Найдено {count} .{extension} документа:"
+        else:
+            header = f"В библиотеке найдено {count} документов:"
 
     lines = [header]
     for index, source in enumerate(sources, start=1):
@@ -879,9 +899,16 @@ class ChatMessageCreateView(APIView):
             f"Scope: {json.dumps(scope, ensure_ascii=False)}\n"
             f"Retrieval: {json.dumps(retrieval, ensure_ascii=False)}\n"
         )
+        user_language = detect_user_language(content)
+        language_instruction = (
+            "Answer in English because the user's latest message is in English.\n"
+            if user_language == "en"
+            else "Отвечай на русском языке, потому что последнее сообщение пользователя написано на русском.\n"
+        )
 
         system_prompt = (
             "You are RecallOS AI, a personal knowledge workspace assistant.\n"
+            f"{language_instruction}"
             "Use the retrieved personal document excerpts, their sections, pages, and detected entities to answer accurately.\n"
             "Use the recent conversation history to resolve follow-up questions and pronouns.\n"
             "For list-style questions, consolidate facts across all supplied excerpts instead of answering from the first excerpt only.\n"
@@ -903,6 +930,7 @@ class ChatMessageCreateView(APIView):
                     query_mode=query_mode,
                     scope=scope,
                     candidate_sources_by_ref=candidate_sources_by_ref,
+                    user_language=user_language,
                 )
                 sources = resolve_answer_sources(candidate_sources_by_ref, cited_refs=[], query_mode=query_mode)
             else:

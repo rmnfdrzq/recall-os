@@ -232,6 +232,35 @@ class RecallOSServerTests(APITestCase):
         self.assertEqual(len(message_response.data['sources']), 1)
         self.assertEqual(message_response.data['sources'][0]['document_id'], 'large-text-doc')
 
+    def test_library_inventory_message_accepts_missing_scope_filters(self):
+        session_response = self.client.post(reverse('chatsession-list'), {
+            "title": "Inventory Chat"
+        }, format='json')
+        session_id = session_response.data['id']
+
+        message_response = self.client.post(reverse('chat_message_create', kwargs={"session_id": session_id}), {
+            "content": "Which documents do I have in my library?",
+            "query_mode": "library_inventory",
+            "scope": {},
+            "context_chunks": [
+                {
+                    "document_id": "local-doc-1",
+                    "filename": "notes.md",
+                    "suggested_title": "Project Notes",
+                    "section_title": "Library Inventory",
+                    "content_type": "document_metadata",
+                    "reason": "library_inventory",
+                    "content": "Filename: notes.md\nSuggested title: Project Notes",
+                }
+            ],
+        }, format='json')
+
+        self.assertEqual(message_response.status_code, status.HTTP_201_CREATED)
+        self.assertIn("Found 1 document", message_response.data["content"])
+        self.assertNotIn("В библиотеке", message_response.data["content"])
+        self.assertIn("Project Notes", message_response.data["content"])
+        self.assertEqual(message_response.data["sources"][0]["document_id"], "local-doc-1")
+
     def test_answer_sources_do_not_fallback_to_multiple_uncited_candidates(self):
         candidate_sources_by_ref = {
             "S1": {"source_ref": "S1", "document_id": "cv-doc", "filename": "CV.pdf"},
@@ -298,6 +327,27 @@ class RecallOSServerTests(APITestCase):
         self.assertIn("Найдено 2 .txt документа", answer)
         self.assertIn("city_architecture.txt", answer)
         self.assertIn("large_test_text_english.txt", answer)
+
+    def test_deterministic_metadata_answer_matches_english_user_language(self):
+        candidate_sources_by_ref = {
+            "S1": {
+                "source_ref": "S1",
+                "document_id": "notes-doc",
+                "filename": "notes.md",
+                "suggested_title": "Project Notes",
+            },
+        }
+
+        answer = build_deterministic_metadata_answer(
+            query_mode="library_inventory",
+            scope={"filters": {}},
+            candidate_sources_by_ref=candidate_sources_by_ref,
+            user_language="en",
+        )
+
+        self.assertIn("Found 1 document", answer)
+        self.assertIn("Project Notes", answer)
+        self.assertNotIn("В библиотеке", answer)
 
     def test_parse_structured_llm_response_reads_answer_and_used_document_ids(self):
         parsed = parse_structured_llm_response(
