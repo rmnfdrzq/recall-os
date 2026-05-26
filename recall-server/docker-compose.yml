@@ -1,0 +1,53 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: recallos-server-web:latest
+    container_name: recallos_api
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=False
+      - DB_NAME=recallos_db
+      - DB_USER=recallos_admin
+      - DB_PASSWORD=admin_secure_password_replace_me
+      - DB_HOST=db
+      - DB_PORT=5432
+      # Cloud service API keys
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_EMBEDDING_MODEL=bge-m3
+      - OLLAMA_LLM_MODEL=gemma4:31b-cloud
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    container_name: recallos_db
+    restart: always
+    environment:
+      - POSTGRES_DB=recallos_db
+      - POSTGRES_USER=recallos_admin
+      - POSTGRES_PASSWORD=admin_secure_password_replace_me
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recallos_admin -d recallos_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
